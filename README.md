@@ -3,9 +3,13 @@ This repository contains the code for the NeurIPS 2021 paper: [Controlled Text G
 # Dependencies
 
 [pytorch](#) >= 1.6
+
 [transformers](#) >=
+
 (optional) [sentence-transformers](#) >= 
+
 (optional) [POT](#) >=
+
 
 # Quick Start
 
