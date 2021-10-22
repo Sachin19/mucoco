@@ -18,6 +18,8 @@ python decode.py
 
 ## Style Transfer experiments
 
+see examples
+
 # Adding new constraints
 
 See 'mucoco/losses/'
