@@ -102,7 +102,7 @@ def get_parser():
     parser.add_argument("--beam-size", default=1, type=int)
     parser.add_argument("--suffix-length", default=0, type=int)
     parser.add_argument("--prefix-length", default=0, type=int)
-    parser.add_argument("--label-id", default="none", type=str, help="for binary classification losses, which is the label of interest")
+    parser.add_argument("--label-id", default="none", type=str, help="for classification losses, which is the label of interest")
     parser.add_argument("--suffix-source", default=None, type=str)
     parser.add_argument(
         "--decode-temperature", default=1.0, type=float, help="softmax temperature"
