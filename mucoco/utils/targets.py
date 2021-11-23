@@ -317,3 +317,131 @@ class TargetProbability(nn.Module): #this is the class used in the final results
         else: # uniform
             torch.nn.init.ones_(self._pred_probs)
             self._pred_probs.data.div_(self._pred_probs.data.sum(dim=-1, keepdims=True))
+
+class TargetEmbeddings(nn.Module): 
+    def __init__(
+        self,
+        embed_dim,
+        embed_lut,
+        sent_length,
+        batch_size,
+        device,
+        st=False,
+        init_value=None,
+        random_init=False,
+        sampling_strategy="argmax",
+        sampling_strategy_k = 0,
+        embed_scales=None,
+        metric="dot",
+        same_embed=True,
+    ):
+        super(TargetEmbeddings, self).__init__()
+        self._pred_embeds = nn.Parameter(torch.Tensor(batch_size, sent_length, embed_dim).to(device))
+        self.device = device
+        self.st = st #straight-through or not
+        self.sampling_strategy = sampling_strategy
+        self.sampling_strategy_k = sampling_strategy_k   
+        self.embed_scales = embed_scales   
+        self.metric=metric   
+        self.same_embed=same_embed
+        self.temperature=0.1
+        
+        
+        if self.metric == "cosine":
+            self.tgt_emb = torch.nn.functional.normalize(embed_lut.weight.data, p=2, dim=-1)
+        else:
+            self.tgt_emb = embed_lut.weight.data
+        
+        self.initialize(random_init=random_init, init_value=init_value)
+
+    def forward_multiple(self, embed_luts):
+        if self.same_embed:
+            embed_luts = [embed_luts[0] for _ in embed_luts] #need to verify
+        
+        if self.embed_scales is None:
+            embed_scales = [1.0 for i in embed_luts]
+
+        pred_embeds = self._pred_embeds    
+        pred_logits = _emb_to_scores(self.metric, pred_embeds, self.tgt_emb)
+        
+        pred_probs = F.softmax(pred_logits / self.temperature, dim=-1)
+        _, index = pred_probs.max(-1, keepdim=True)
+        predictions = index.squeeze(-1)
+        
+        softmax_pred_probs = pred_probs
+        # if self.st:
+        #     y_hard = torch.zeros_like(pred_probs).scatter_(-1, index, 1.0)
+        #     pred_probs = y_hard - pred_probs.detach() + pred_probs
+        
+        # pred_embs = []
+        # for embed_lut, embed_scale in zip(embed_luts, self.embed_scales):
+        #     pred_embs.append((pred_probs.unsqueeze(-1) * embed_lut.weight).sum(dim=-2))
+        
+        # return (pred_embs, ), predictions, (pred_probs, softmax_pred_probs) #pred_probs is actually just logits
+
+        # 
+        
+        y_hard = torch.zeros_like(pred_probs).scatter_(-1, index, 1.0)
+        # pred_probs = y_hard
+        # # softmax_pred_probs = pred_probs
+        # softmax_pred_probs = None
+
+        pred_embs = []
+        if self.st:
+            pred_probs = y_hard - pred_probs.detach() + pred_probs
+            for embed_lut, embed_scale in zip(embed_luts, self.embed_scales):
+                n_pred_embs = embed_lut(predictions)
+                pred_embs.append(pred_embeds + (n_pred_embs-pred_embeds).detach())
+        else:
+            for embed_lut, embed_scale in zip(embed_luts, self.embed_scales):
+                pred_embs.append(pred_embeds)
+        
+        # # pred_embs = []
+        # # for embed_lut, embed_scale in zip(embed_luts, self.embed_scales):
+        # #     if embed_lut.weight.size(0) > pred_probs.size(2):
+        # #         pred_embs.append((pred_probs.unsqueeze(-1) * embed_lut.weight[:pred_probs.size(2), :]).sum(dim=-2))
+        # #     elif embed_lut.weight.size(0) < pred_probs.size(2):
+        # #         pred_embs.append((pred_probs[:, :, :embed_lut.weight.size(0)].unsqueeze(-1) * embed_lut.weight).sum(dim=-2))
+        # #     else:
+        # #         pred_embs.append((pred_probs.unsqueeze(-1) * embed_lut.weight).sum(dim=-2))
+
+        return (pred_embs, self._pred_embeds), predictions, (pred_probs, softmax_pred_probs) #pred_probs is actually just logits
+
+
+    def initialize(self, random_init=False, init_value=None):
+        if init_value is not None:
+            self._pred_embeds.data.copy_(init_value_.data)
+        elif random_init: 
+           torch.nn.init.normal_(self._pred_embeds, 0, 1.0)
+        else: # uniform
+            # vocabsize = self.tgt_emb.size(0)
+            # uniform = torch.ones((self._pred_embeds.size(0), self._pred_embeds.size(1), vocabsize)).to(self.device)/vocabsize
+            # vec = (uniform.unsqueeze(-1) * self.tgt_emb).sum(dim=-2)
+            # self._pred_embeds.data.copy_(vec.data)
+            # init_value = torch.ones_like(self._pred_embeds).to(self.device)
+            # init_value = torch.nn.functional.normalize(init_value, p=2, dim=-1)
+            # self._pred_embeds.data.copy_(init_value.data)
+            # print(torch.linalg.norm(self.tgt_emb, dim=-1).max(-1))
+            # print(torch.linalg.norm(self.tgt_emb, dim=-1).min(-1))
+            # input()
+            torch.nn.init.zeros_(self._pred_embeds)
+            
+        
+    def printparams(self):
+        print(self._pred_embeds)
+
+
+def _emb_to_scores(metric, pred_emb, tgt_out_emb):
+    if metric == "l2": 
+        scores = (pred_emb.unsqueeze(2) - tgt_out_emb.unsqueeze(0))
+        scores = -(scores*scores).sum(dim=-1)
+
+    elif metric == "cosine": # cosine and vmf work more or less the same for decoding
+        pred_emb_unitnorm = torch.nn.functional.normalize(pred_emb, p=2, dim=-1)
+        # target_unitnorm = torch.nn.functional.normalize(tgt_out_emb.weight, p=2, dim=-1)
+        scores = pred_emb_unitnorm.matmul(tgt_out_emb.t())
+    
+    else: # dot product
+        return pred_emb.matmul(tgt_out_emb.t())
+    
+    return scores

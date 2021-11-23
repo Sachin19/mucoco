@@ -383,6 +383,11 @@ class Optimizer(object):
                 clip_grad_norm_(group["params"], self._max_grad_norm)
             elif self._fp16 is None and self._max_grad_norm > 0 and not self.ascent:
                 clip_grad_norm_(group["params"], self._max_grad_norm)
+
+            # for p in group['params']:
+            #     param_norm = p.grad.data.norm(2, -1).sum(dim=0)
+            #     print(param_norm)
+            # input()
         
         # for group in self._optimizer.param_groups:
         #     print(group["lr"])

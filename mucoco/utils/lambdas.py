@@ -8,6 +8,10 @@ class Lambda(torch.nn.Module): #multipliers for the constraints
     def forward(self):
         return self.lambda_
 
+    def get_mask(self, i, damp):
+        # if constraint is satified and lambda < damp, then don't use lambdas to update thetas
+        return 1 - damp.ge(0.).float() * self.lambda_[i].data.le(damp).float()
+
     def get_loss(self, i, damp, loss):
         return (self.lambda_[i] - damp) * loss
     

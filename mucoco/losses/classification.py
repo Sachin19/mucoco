@@ -1,8 +1,9 @@
 from mucoco.losses import BaseLoss, register_loss
 
-
 import torch 
 import torch.nn.functional as F
+
+import logging
 
 @register_loss("classification")
 class ClassificationLoss(BaseLoss):
@@ -15,8 +16,8 @@ class ClassificationLoss(BaseLoss):
         self.args = args
         self.device = model.device
 
-        bos_token_id = self.tokenizer.bos_token_id
-        eos_token_id = self.tokenizer.eos_token_id    
+        self.bos_token_id = self.tokenizer.bos_token_id
+        self.eos_token_id = self.tokenizer.eos_token_id    
     
     def compute_loss(self, batch, preds, **kwargs):
         '''
@@ -53,16 +54,17 @@ class ClassificationLoss(BaseLoss):
             "max_length": prefix.size(1) + pred_tokens.size(1),
             "nsentences": batch_size,
             "lm_logprobs": lm_logprobs.data.cpu(),
-            "mm": mm,
         }
 
         return loss, logging_output
 
-    def compute_gold_loss(self, batch):
+    def compute_gold_loss(self, batch, **kwargs):
         '''
         given a discrete target output, this will compute the loss wrt to it. Useful in debugging
         '''
         source, target = batch
+
+        batch_size=target.size(0)
     
         model_output = self.model(target)
         lm_logits = model_output[0]
