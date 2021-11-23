@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import sys
+import re
 import torch
 import numpy as np
 import transformers
@@ -10,71 +11,49 @@ import transformers
 from transformers import AutoTokenizer, AutoConfig
 from sentence_transformers import SentenceTransformer, util
 
-from mucoco.utils import TargetProbability, Lambda, Optimizer, get_epsilon
+from mucoco.utils import TargetProbability, TargetEmbeddings, TargetSimplex, Lambda, Optimizer, get_epsilon
 import mucoco.losses as lossbuilder
 import mucoco.options as options
 
 import torch.nn.functional as F
 
-logging.disable(logging.WARNING)
-# logging.getLogger("transformers.GPT2ForSequenceClassification").disabled=True
+# To control logging level for various modules used in the application:
+# from here: https://github.com/huggingface/transformers/issues/3050
+def set_global_logging_level(level=logging.ERROR, prefices=[""]):
+    """
+    Override logging levels of different modules based on their name as a prefix.
+    It needs to be invoked after the modules have been loaded so that their loggers have been initialized.
 
-def get_pareto_set(pareto_set, content_loss, style_loss, prediction):
-    pareto_set.append((content_loss, style_loss, prediction))
-    # print(len(pareto_set))
-    if len(pareto_set) == 1:
-        return [(content_loss, style_loss, prediction)]
-
-    new_pareto_set = []
-    for i in range(len(pareto_set)):
-        l1, l2, pred = pareto_set[i]
-        flag=False
-        for j in range(len(pareto_set)):
-            if i != j:
-                l1j, l2j, predj = pareto_set[j]
-                if l1j <= l1 and l2j <= l2 and (l1j < l1 or l2j < l2):
-                    flag=True
-                    break
-        
-        if not flag:
-            new_pareto_set.append((l1, l2, pred))
-    # print(new_pareto_set)
-    return new_pareto_set
-
-
-    # new_pareto_set = []
-    # flag = False
-    # for (l1, l2, pred) in pareto_set:
-    #     if (content_loss <= l1) and (style_loss <= l2):
-    #         if not flag:
-    #             new_pareto_set.append((content_loss, style_loss, prediction))
-    #             flag = True
-    #     elif (content_loss <= l1) or (style_loss <= l2):
-    #         new_pareto_set.append((l1, l2, pred))
-    print(len(new_pareto_set))
-    return new_pareto_set
-
+    Args:
+        - level: desired level. e.g. logging.INFO. Optional. Default is logging.ERROR
+        - prefices: list of one or more str prefices to match (e.g. ["transformers", "torch"]). Optional.
+          Default is `[""]` to match all active loggers.
+          The match is a case-sensitive `module_name.startswith(prefix)`
+    """
+    prefix_re = re.compile(fr'^(?:{ "|".join(prefices) })')
+    for name in logging.root.manager.loggerDict:
+        if re.match(prefix_re, name):
+            logging.getLogger(name).setLevel(level)
 
 def main(args):
     logging.basicConfig(
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        level=os.environ.get("LOGLEVEL", "INFO").upper(),
+        level=logging.ERROR,
         stream=sys.stdout,
     )
     logger = logging.getLogger("mucoco")
-    # logging.getLogger('AutoModelforSequenceClassification').setLevel(logging.ERROR)
+    logger.setLevel(logging.ERROR)
     logger.info(args)
 
     if args.outfile is not None:
         outf = open(args.outfile, "w")
-        # f2 = open(args.outfile + ".ref", "w")
-        # fprefix = open(args.outfile + ".prefix", "w")
+        outallsatf = open(args.outfile + ".allsat", "w")
 
-    # Fix seed for stochastic decoding
+    # Fix seed
     if args.seed is not None:
         np.random.seed(args.seed)
-        utils.set_torch_seed(args.seed)
+        torch.manual_seed(0)
 
     use_cuda = torch.cuda.is_available() and not args.cpu
     logger.info(
@@ -139,7 +118,10 @@ def main(args):
                 name2model[model_path] = getattr(transformers, model_types[i]).from_pretrained(model_path, config=name2config[model_path], cache_dir=args.cache_dir)
             
             if not args.show_warnings:
-                logging.getLogger(name2model[model_path].__class__.__name__).setLevel(logging.ERROR) 
+                # print(logging.root.manager.loggerDict)
+                # input()
+                set_global_logging_level(logging.ERROR, [name2model[model_path].__module__])
+                # logging.getLogger(name2model[model_path].__class__.__name__).setLevel(logging.ERROR) 
             
             name2model[model_path].eval()
             new_vocab_size = name2model[model_path].get_input_embeddings().num_embeddings
@@ -152,13 +134,14 @@ def main(args):
                     logger.warning("all models don't have the same vocabulary and we are still proceeding")
             prev_vocab_size = vocab_size
         
-        if i == 0:
-            primary_vocab_size = vocab_size
-
         if args.target_tokenize_different: # for seq2seq models where target tokenizer is different than the source tokenizer
             embed_luts.append(name2model[model_path].get_decoder().get_input_embeddings())
         else:
             embed_luts.append(name2model[model_path].get_input_embeddings())
+        
+        if i == 0:
+            primary_vocab_size = vocab_size
+            primary_embed_dim = embed_luts[-1].embedding_dim
         
         if getattr(name2model[model_path], "get_decoder", None) is None: #this is for MarianMT models which have a weird embedding_scale parameter
             embed_scales.append(1.0)
@@ -176,11 +159,8 @@ def main(args):
         lossfns.append(lossbuilder.build_loss(loss, name2model[model_paths[i]], name2tokenizer[model_paths[i]], args))
         loss2modelname[loss] = model_paths[i]
         loss2tokenizer[loss] = name2tokenizer[model_paths[i]]
+    primary_tokenizer = loss2tokenizer[losses[0]]
     
-    # if "metrics" in args.stopping_criterion:
-    #     logger.info("Loading evaluation models")
-    #     from stopping_criterion import transferability, acceptability, sts_similarity, wieting_sim
-
     logger.info("tokenizer(s), model(s) and loss function(s) loaded")
 
     if args.model_dtype == "fp16": #while this is supported it doesn't work that well yet. Not recommended
@@ -216,11 +196,11 @@ def main(args):
             target_data = data_paths[0]
         else:
             source_data = data_paths[0]
-            target_data = data_paths[1] #useful for debugging
+            target_data = data_paths[1] # useful for debugging
     
         additional_data = args.additional_data
         if additional_data is None:
-            additional_data = source_data #additional data was used in strap when x is paraphrased to z, then the model is used to generate y in the target style. If there's no additional_data, it defaults to the source text
+            additional_data = source_data # additional data was used in STRAP (Krishna et al 2020) when x is paraphrased to z, then the model is used to generate y in the target style. If there's no additional_data, it defaults to the source text
     else:
         source_data = args.additional_data
         target_data = args.additional_data
@@ -244,8 +224,15 @@ def main(args):
     # allparetosets = []
     all_stepcounts = []
 
-    #data loading is very simple but probably can be sped up
+    #data loading is very simple and probably can be sped up
+
+    if args.gold_loss_epsilons is not None and args.gold_loss_epsilons != "none":
+        args.gold_loss_epsilons = args.gold_loss_epsilons.lower().split(":")
+        assert len(args.gold_loss_epsilons) == len(losses)-1
+    else:
+        args.gold_loss_epsilons = ["false" for _ in range(len(losses)-1)]
     for source_text, target_text, additional_text in zip(source_dataset, target_dataset, additional_dataset):
+        
         early_skip="n"
         if args.debug:
             early_skip = input(f"skip this example? {source_text} [yes(y)/maybe(m)/no(n)]")
@@ -255,9 +242,9 @@ def main(args):
         if args.num_examples > 0 and c > 0 and c == args.num_examples: #stop after processing num_examples if it is set 
             print(f"done {c}")
             break
+
         c += 1
 
-        primary_tokenizer = loss2tokenizer[losses[0]]
         source_indices = primary_tokenizer.encode(source_text, return_tensors="pt").to(device)
         additional_indices = primary_tokenizer.encode(additional_text, return_tensors="pt", add_special_tokens=False).to(device)
 
@@ -266,7 +253,11 @@ def main(args):
             with primary_tokenizer.as_target_tokenizer():
                 eos_token_id=primary_tokenizer.eos_token_id
                 
-        predicted_indices = clean_output(name2model[model_paths[0]].generate(additional_indices, max_length=25, num_beams=args.beam_size)[0].tolist(), eos_token_id=eos_token_id, return_tensors=True)
+        with torch.no_grad():
+            predicted_indices = clean_output(lossfns[0].generate(input_ids=source_indices, additional_ids=additional_indices)[0].tolist(), eos_token_id=eos_token_id, return_tensors=True) #some bug about length
+            # print(additional_indices)
+            print(source_text, additional_text, predicted_indices)
+            # input()
 
         if args.target_tokenize_different:
             with primary_tokenizer.as_target_tokenizer():
@@ -275,7 +266,7 @@ def main(args):
             beam_prediction = primary_tokenizer.decode(predicted_indices[0].tolist())
 
         if not args.target_tokenize_different and "Seq2SeqLM" in model_paths[0]:
-            logger.warning("you are using a seq2seq model for your primary loss but not tokenizing the target sentences with a different tokenizer.")
+            logger.warning("you are using a seq2seq model for your primary loss but not tokenizing the target sentences with a different target tokenizer.")
 
         #for_predicted_source_indices, are used to compute the primary loss wrt source as target. Useful for debugging style transfer models. 
         if args.target_tokenize_different:
@@ -303,70 +294,85 @@ def main(args):
             skip=False
             predicted_allsat=False
             lengthwise_best_prediction = [None] * batch_size
+
             if predicted_batch is not None:
-                # losses of the beam-search output: we should perform atleast well as this. If we don't, we predict this output
-                # Also, we the beam-search output already satisfies the constraints, we skip mucoco
+                # losses of the beam-search output: we should perform atleast as well as this. If we don't, we predict this output
+                # Also, if the beam-search output already satisfies the constraints, we skip mucoco unless, args.always_mucoco is true
                 predicted_labels = {}
                 total_predicted_loss = 0.0
-                for lossid in range(len(predictedlosslists)):
+                predicted_allsat=True
+                predictedlosses = []
+                for lossid in range(len(losses)):
                     lossname = losses[lossid]
                     predicted_loss, predicted_lo =\
                         lossfns[lossid].compute_gold_loss(
                             (source_batch, predicted_batch), 
                             additional_batch=additional_batch, 
                             label_id=label_ids[lossid])
-
+                    
+                    predictedlosses.append(predicted_loss.data.cpu())
                     predicted_loss = predicted_loss.sum().item()
                     total_predicted_loss += betas[lossid] * predicted_loss
-                    predicted_allsat=True
+
                     if lossid > 0:
                         predicted_allsat = predicted_allsat and (predicted_loss <= min_epsilons[lossid-1])
+                    
                     if "label_prediction" in predicted_lo:
                         predicted_labels[lossid] = predicted_lo['label_prediction']
                     else:
                         predicted_labels[lossid] = "NA"
-                    predictedlosslists[lossid].append(predicted_loss)
-
-                    if args.gold_loss_epsilons and lossid > 0: #use the predicted loss 
-                        min_epsilons[lossid - 1] = predicted_loss
+                    
+                predictedlosslists.append(predictedlosses)
+                if lossid > 0 and args.gold_loss_epsilons[lossid-1] == "true": #use the predicted loss as the threshold, mucoco has to beat it then
+                    min_epsilons[lossid - 1] = predicted_loss
                 
                 lengthwise_best_prediction = [(beam_prediction, total_predicted_loss, predicted_allsat)]
-
-            skip = predicted_allsat
+                skip = predicted_allsat
+                
+            definite_skip = False
             if args.debug and early_skip=="m": 
                 print(f"new example: {source_text}\nautoregressive output: {beam_prediction}")
                 for lossid in range(len(losses)):
-                    print(f"{lossabbr[lossid]} for desired label_id({label_ids[lossid]}): {predictedlosslists[lossid][-1]}; predicted label: {predicted_labels[lossid]}")
+                    print(f"{lossabbr[lossid]} for desired label_id({label_ids[lossid]}): {predictedlosslists[-1][lossid]}; predicted label: {predicted_labels[lossid]}")
                 if predicted_allsat:
                     print(f"autoregressive output already satisfies the constraints")
-                skip = input(f"skip this example? [y/n]")
-                skip = skip == "y"
+                definite_skip = input(f"skip this example? [y/n]")
+                definite_skip = definite_skip == "y"
+
+                # if definite_skip:
+                #     print("Skipping this example. the beam search output already satisfies all the constraints or there's no constraints")
+                #     prediction_ids = ", ".join([str(idx) for idx in predicted_indices[0].tolist()])
+                #     prediction = beam_prediction
+                #     print(f"Prediction ids: {prediction_ids}")
+                #     print(f"Prediction: {prediction}")
+                #     print()
+
+            elif skip and predicted_allsat and not args.always_mucoco:
+                # print("Skipping this example. the beam search output already satisfies all the constraints or there's no constraints")
+                # if args.debug:
+                #     prediction_ids = ", ".join([str(idx) for idx in predicted_indices[0].tolist()])
+                #     prediction = beam_prediction
+                #     print(f"Prediction ids: {prediction_ids}")
+                #     print(f"Prediction: {prediction}")
+                #     print()
+                definite_skip = True
             
-            if skip and predicted_allsat and not args.always_mucoco:
-                print("the beam search output already satisfies all the constraints or there's no constraints. Skipping this example")
-                if args.debug:
-                    prediction_ids = ", ".join([str(idx) for idx in predicted_indices[0].tolist()])
-                    prediction = beam_prediction
-                    print(f"Prediction ids: {prediction_ids}")
-                    print(f"Prediction: {prediction}")
-                    print()
-                
-            if not skip:
+            if not definite_skip:
                 if args.max_length is None and args.init not in ["source", "target"]: 
                     #since we don't know the about length, we search in a (-length_diff, length_diff) window and predict the best performing one. 
                     predicted_length = predicted_batch.size(1)
                     length_range = range(max(1, predicted_length-args.length_diff), predicted_length+args.length_diff+1)
                     length_range = [x for x in length_range if x <= args.max_allowed_length and x >= 1]
-                    print(predicted_length, length_range)
+                    # print(predicted_length, length_range)
                     length_range = sorted(list(set(length_range)))
                 else: 
-                    #another way to use this approach is train models which also compute loss on <pad> token and then predict the entire sentence including pad, it has shown to work decently in some of our experiments
+                    #another way to use this approach is train models which also compute loss on <pad> token and then predict the entire sentence including pad, it has shown to work in some of our experiments
                     length_range = [args.max_length]
 
                 for sent_length_ in length_range:
                     # prefix_length is used to indicate if instead of predicting the entire sentence via optimization, we want to fix a prefix (of specified length) and predict the remaining suffix. We use part of the beam search prediction as the prefix. 
                     if args.prefix_length > 0:
-                        sent_length = sent_length - args.prefix_length
+                        sent_length = sent_length_ - args.prefix_length
                         target_prefix = predicted_batch[:, :args.prefix_length]
                     else:
                         sent_length = sent_length_
@@ -421,6 +427,35 @@ def main(args):
                             sampling_strategy_k=args.sampling_strategy_k,
                             embed_scales=embed_scales
                         )
+                    elif args.target_type == "embeds":
+                        init_value = None
+                        if args.init == "source": #initialize the target with the source
+                            init_value = embed_luts[0](source_batch)
+                            target_prefix = torch.empty((source_indices.size(0), 0)).long().to(device)
+                            sent_length = init_value.size(1)
+                            # print(source_batch, init_value, sent_length, init_value)
+                        elif args.init == "target": #initialize the target with the autoregressive output
+                            init_value = embed_luts[0](target_batch)
+                            target_prefix = torch.empty((source_indices.size(0), 0)).long().to(device)
+                            sent_length = init_value.size(1)
+
+                        outputs = TargetEmbeddings(
+                            embed_dim=primary_embed_dim,
+                            embed_lut=embed_luts[0],
+                            sent_length=sent_length,
+                            batch_size=batch_size,
+                            device=device,
+                            st=args.st,
+                            init_value=init_value,
+                            random_init=args.init == "random",
+                            sampling_strategy=args.sampling_strategy,
+                            sampling_strategy_k=args.sampling_strategy_k,
+                            embed_scales=embed_scales,
+                            metric=args.metric,
+                            same_embed=args.same_embeds,
+                        )
+                    else:
+                        raise ValueError("Wrong target_type")
 
                     if len(losses) > 1:
                         lambda_ = Lambda(count=len(epsilons))
@@ -428,6 +463,8 @@ def main(args):
                             lambda_.cuda()
 
                     optimizer = Optimizer.from_opt(outputs, args)
+                    # print(optimizer._optimizer.param_groups)
+                    # input()
                     if len(losses) > 1:
                         old_optim = args.optim
                         args.optim = "ascentsgd"
@@ -450,18 +487,21 @@ def main(args):
                     if args.model_dtype == "fp16" and args.fp16_source == "pytorch":
                         scaler = torch.cuda.amp.GradScaler()
                 
-                
                     for lossid, lossname in enumerate(losses):
                         losslists[lossid].append([])
 
+                    broken=False
                     for step in range(args.optim_steps):
                         try:
                             with torch.cuda.amp.autocast():
                                 losses_for_backward = []
                                 logging_outputs = []
+
                                 pred_embeds, pred_tokens, pred_probs = outputs.forward_multiple(embed_luts)  # forward
-                                print(len(pred_embeds[0]))
-                                print(len(embed_luts))
+                                
+                                original_preds = None
+                                if len(pred_embeds) > 1:
+                                    original_preds = pred_embeds[1]
 
                                 for lossid, lossname in enumerate(losses):
                                     lossvalue, logging_output =\
@@ -470,7 +510,8 @@ def main(args):
                                             [pred_tokens, pred_embeds[0][lossid], pred_probs], 
                                             additional_batch=additional_batch, 
                                             embed_scale=embed_scales[lossid], 
-                                            label_id=label_ids[lossid]
+                                            label_id=label_ids[lossid],
+                                            original_preds=original_preds
                                         )
 
                                     losslists[lossid][-1].append(lossvalue.sum().item())  #for logging
@@ -491,26 +532,38 @@ def main(args):
                                     total_loss = 0
                                     cur_epsilons = [] # just for avoiding syntax errors, epsilons are useless in this setting
                                     for sid in range(len(losses_for_backward)):
-                                        total_loss = total_loss + betas[i] * losses_for_backward[0]
+                                        total_loss = total_loss + betas[sid] * losses_for_backward[sid]
                                         cur_epsilons.append(0.0)
                                 else:
+                                    total_loss = 0.0
                                     total_loss = losses_for_backward[0]
-                                    total_loss_for_lambda = 0.0
+                                    # total_loss_for_lambda = 0.0
                                     cur_epsilons = []
-                                    for sid in range(1, len(losses_for_backward)): #the secondary losses or constraints
-                                        cur_epsilon = get_epsilon(step, epsilons[sid-1], min_epsilons[sid-1], epsilon_warmup_steps[sid-1], epsilon_cooldown_steps[i-1], epsilon_decay_functions[sid-1])
 
+                                    for sid in range(1, len(losses_for_backward)): #the secondary losses or constraints
+                                        cur_epsilon = get_epsilon(step, epsilons[sid-1], min_epsilons[sid-1], epsilon_warmup_steps[sid-1], epsilon_cooldown_steps[sid-1], epsilon_decay_functions[sid-1])
                                         damp = args.dampness * (cur_epsilon - losses_for_backward[sid]).detach()
-                                        closs_for_theta = lambda_.get_loss(sid - 1, damp, torch.clamp(cur_epsilon - losses_for_backward[sid], max=0.0))
-                                        closs_for_lambda = lambda_.get_loss(sid - 1, damp, cur_epsilon - losses_for_backward[sid])
-                                        
+
+                                        # closs_for_theta = lambda_.get_loss(sid - 1, damp, torch.clamp(cur_epsilon - losses_for_backward[sid], max=0.0))
+                                        mask = lambda_.get_mask(sid-1, damp)
+                                        # print(mask)
+                                        # print(damp)
+                                        # print(losses_for_backward[sid])
+                                        # print(lambda_()[sid-1])
+                                        closs_for_theta = lambda_.get_loss(sid - 1, damp * mask, (cur_epsilon - losses_for_backward[sid]))
+                                        # closs_for_lambda = lambda_.get_loss(sid - 1, damp, cur_epsilon - losses_for_backward[sid])
+                                        # print(closs_for_theta, closs_for_lambda)        
+                                        # print(closs_for_theta)
                                         total_loss = total_loss - closs_for_theta
-                                        total_loss_for_lambda = total_loss_for_lambda - closs_for_lambda
+                                        # total_loss_for_lambda = total_loss_for_lambda - closs_for_lambda
                                         cur_epsilons.append(cur_epsilon)                                    
                                 
                                 total_batchloss = total_loss.sum()
+                                # total_batchloss.backward(retain_graph=True, scaler=scaler)
+                                
                             
                             optimizer.backward(total_batchloss, retain_graph=True, scaler=scaler)
+                            # outputs.printparams()
                             # if args.debug:
                             #     total_norm = 0
                             #     gi=0
@@ -518,11 +571,11 @@ def main(args):
                             #         gi+=1
                             #         param_norm = p.grad.data.norm(2, -1).sum(dim=0)
                             #         print("for theta", param_norm)
-                            optimizer.step(scaler=scaler)
 
+                            optimizer.step(scaler=scaler)
                             if len(losses) > 1 and not args.linear_scale:
-                                total_batchloss_for_lambda = total_loss_for_lambda.sum()
-                                optimizer_lambda.backward(total_batchloss_for_lambda, retain_graph=True, scaler=scaler)
+                                # total_batchloss_for_lambda = total_loss_for_lambda.sum()
+                                # optimizer_lambda.backward(total_batchloss_for_lambda, retain_graph=True, scaler=scaler)
                                 optimizer_lambda.step()
                                 lambda_.make_positive()
                                 # if args.debug:
@@ -532,19 +585,23 @@ def main(args):
                                 #         gi+=1
                                 #         param_norm = p.grad.data.norm(2, -1).sum(dim=0)
                                 #         print("for lambda", param_norm)
+
                             
-                            def get_sent(tokens, tokenizer):
-                                batch = []
-                                if args.target_tokenize_different:
-                                    with tokenizer.as_target_tokenizer():
-                                        for toks in tokens:
-                                            batch.append(tokenizer.decode(clean_output(toks.tolist(), -1)))
-                                else:
-                                    for toks in tokens:
-                                        batch.append(tokenizer.decode(clean_output(toks.tolist(), -1)))
-                                return batch
+                            # outputs.printparams()
+                            # input()
                             
                             if args.debug:
+                                def get_sent(tokens, tokenizer):
+                                    batch = []
+                                    if args.target_tokenize_different:
+                                        with tokenizer.as_target_tokenizer():
+                                            for toks in tokens:
+                                                batch.append(tokenizer.decode(clean_output(toks.tolist(), -1)))
+                                    else:
+                                        for toks in tokens:
+                                            batch.append(tokenizer.decode(clean_output(toks.tolist(), -1)))
+                                    return batch
+
                                 target_sents = get_sent(torch.cat([target_prefix, pred_tokens], dim=1), primary_tokenizer)
                                 print(target_sents)
                             
@@ -569,8 +626,14 @@ def main(args):
                                     
                                 constrained = ",".join(constrained)
 
-                                if best_loss[b] is None or (best_loss[b] > cur_loss):
-                                    # if args.selection_criterion != "primary_allsat" or allsat:
+                                modify_condition =\
+                                    best_loss[b] is None or\
+                                    (args.selection_criterion == "primary_allsat" and not best_allsat[b] and allsat) or\
+                                    (args.selection_criterion == "primary_allsat" and best_allsat[b] and allsat and best_loss[b] > cur_loss) or\
+                                    (args.selection_criterion == "weighted_sum" and best_loss[b] > cur_loss)
+
+                                if step > 0 and modify_condition:
+                                    print(f"modify condition @{step}")
                                     best_loss[b] = cur_loss
                                     best_allsat[b] = allsat
                                     for i in range(len(losses)):
@@ -581,9 +644,10 @@ def main(args):
                                     best_pred_probs[b] = (pred_probs[b].cpu(), logging_outputs[0]["lm_logprobs"][b])
                                     best_constrained = constrained
                                     
-                            if (step) % args.log_interval == 0:
+                            if step > 0 and step % args.log_interval == 0:
                                 if len(losses) > 1:
-                                    log = f"Step {step}: loss:{total_batchloss:.4f}; current [loss:{sum(cur_losses):.4f}; l:{','.join([f'{x:.4f}' for x in lambda_().tolist()])}; e:{','.join([f'{x:.4f}' for x in cur_epsilons])}; cons:{constrained}; "
+                                    log = f"beam cons: {predicted_allsat}; "
+                                    log = f"Step {step}: total_loss:{total_batchloss:.4f}; current [loss:{sum(cur_losses):.4f}; l:{','.join([f'{x:.4f}' for x in lambda_().tolist()])}; e:{','.join([f'{x:.4f}' for x in cur_epsilons])}; cons:{constrained}; "
                                     for i in range(len(losslists)):
                                         log = log + f" {lossabbr[i]}:{losslists[i][-1][-1]:.4f}; "
                                     
@@ -598,7 +662,7 @@ def main(args):
                                     for i in range(len(losslists)):
                                         log = log + f" {lossabbr[i]}:{losslists[i][-1][-1]:.4f}; "
                                     
-                                    log = log[:-1] + f"] best [cur_loss:{sum(best_loss):.4f} "
+                                    log = log[:-1] + f"] best [loss:{sum(best_loss):.4f} "
                                     for i in range(len(best_losses)):
                                         log = log + f"{lossabbr[i]}:{sum(best_losses[i]):.4f}; "
                                     log = log[:-1] + f" at step {best_index[-1]}" 
@@ -606,8 +670,10 @@ def main(args):
                                     print(log)
                             
                             del losses_for_backward
+
                         except KeyboardInterrupt:
                             print("skipping remaining optimizing steps and showing the best option so far")
+                            broken=True
                             break
 
                     predictions = []
@@ -616,32 +682,40 @@ def main(args):
                         if not best_allsat[b]:
                             prediction_ids = ", ".join([str(idx) for idx in predicted_indices[0].tolist()])
                             prediction = beam_prediction
-                            lossvalue = predictedlosslists[b][0]
+
+                            lossvalue = 0.0
+                            for lossid in range(len(betas)):
+                                lossvalue += betas[lossid] * predictedlosslists[-1][lossid][b] # VERIFICATION NEEDED
                             print("best prediction is from beam search, all constraints were not satisfied")
                         else:
                             prediction_ids = ", ".join([str(x) for x in target_prefix[b].tolist()])
                             prediction_ids +=   f'[{", ".join([str(x) for x in item.tolist()])}]'
+                            
+                            targets = clean_output(item.tolist(), primary_tokenizer.eos_token_id)
                             if args.target_tokenize_different:
                                 with primary_tokenizer.as_target_tokenizer():
-                                    prediction = primary_tokenizer.decode(target_prefix[b].tolist()) + ' ' + primary_tokenizer.decode(item.tolist())
+                                    prediction = primary_tokenizer.decode(target_prefix[b].tolist() + targets)
                             else:
-                                targets = clean_output(item.tolist(), primary_tokenizer.eos_token_id)
-                                prediction = primary_tokenizer.decode(targets) + " " + primary_tokenizer.decode(item.tolist())
+                                prediction = primary_tokenizer.decode(target_prefix[b].tolist() + targets)
+
                             print("best prediction at step",best_index[b])
                             lossvalue = best_loss[b]
+
+                            modify_condition =\
+                                lengthwise_best_prediction[b] is None or\
+                                (args.selection_criterion == "primary_allsat" and not lengthwise_best_prediction[b][2] and best_allsat[b]) or\
+                                (args.selection_criterion == "primary_allsat" and lengthwise_best_prediction[b][2] and best_allsat[b] and lengthwise_best_prediction[b][1] > lossvalue) or\
+                                (args.selection_criterion == "weighted_sum" and lengthwise_best_prediction[b][1] > lossvalue)
+                            
+                            if modify_condition:
+                                if args.debug:
+                                    print("modify condition satisfied")
+                                else:
+                                    outallsatf.write("modify_condition satisfied ")
+                                lengthwise_best_prediction[b] = (prediction, lossvalue, best_allsat[b])
+                        
                         prediction_idss.append(prediction_ids)
                         predictions.append(prediction)
-
-                        modify_condition = True 
-                        modify_condition =\
-                            modify_condition or\
-                            lengthwise_best_prediction[b] is None or\
-                            (self.selection_criterion == "primary_allsat" and not lengthwise_best_prediction[b][2] and best_allsat[b]) or\
-                            (self.selection_criterion == "primary_allsat" and lengthwise_best_prediction[b][2] and best_allsat[b] and lengthwise_best_prediction[b][1] > lossvalue) or\
-                            (self.selection_criterion == "weighted_sum" and lengthwise_best_prediction[b][1] > lossvalue)
-                        
-                        if modify_condition:
-                            lengthwise_best_prediction[b] = (prediction, lossvalue, best_allsat[b])
 
                     if args.debug:                    
                         for i, item in enumerate(best_pred_tokens):
@@ -666,26 +740,52 @@ def main(args):
                             for lossid in range(len(losses)):
                                 out.append(f"{losses[lossid]}: {best_losses[lossid][i]}")
                             print("; ".join(out))
-                    all_stepcounts += best_index
-                
-                optimizer.zero_grad()
-                del outputs
-                del optimizer
-                if len(losses) > 1:
-                    optimizer_lambda.zero_grad()
-                    del optimizer_lambda
-                    del lambda_
-                for modelname in loss2modelname.values():
-                    name2model[modelname].zero_grad() 
-                torch.cuda.empty_cache()
+                        
+                        broken_skip = False
+                        if broken:
+                            broken_skip=input("Skip this input entirely? yes(y)/no(continue)/press ctrl+c to exit")
+                            broken_skip = broken_skip.lower() == "y"
 
+                    all_stepcounts += best_index
+
+                    optimizer.zero_grad(set_to_none=True)
+                    del outputs
+                    del optimizer
+                    if len(losses) > 1:
+                        optimizer_lambda.zero_grad()
+                        del optimizer_lambda
+                        del lambda_
+                    for modelname in loss2modelname.values():
+                        name2model[modelname].zero_grad(set_to_none=True) 
+                    torch.cuda.empty_cache()
+
+                    if args.debug and broken_skip:
+                        break
+                    
+                if args.debug:
+                    for b in range(batch_size):
+                        print("best prediction for all lengths: ", lengthwise_best_prediction[b][0].strip().replace("\n", " ") + "\n")
+                else:   
+                    for b in range(batch_size):
+                        outf.write(lengthwise_best_prediction[b][0].strip().replace("\n", " ") + "\n")
+                        outf.flush()
+                        outallsatf.write(str(lengthwise_best_prediction[b][2]) + "\n")
+                        outallsatf.flush()
             
-            if args.debug:
-                print("best prediction: ", lengthwise_best_prediction[b][0].strip().replace("\n", " ") + "\n")
-            else:   
-                for b, item in enumerate(best_pred_tokens):
-                    f.write(lengthwise_best_prediction[b][0].strip().replace("\n", " ") + "\n")
-                    f.flush()
+
+            else: # skipping mucoco and writing beam search output 
+                if args.debug:
+                    print("Skipping this example. the beam search output already satisfies all the constraints or there's no constraints")
+                    for b in range(batch_size):
+                        print("best prediction for all lengths: ", lengthwise_best_prediction[b][0].strip().replace("\n", " ") + "\n")
+                else:
+                    print("Skipping this example. the beam search output already satisfies all the constraints or there's no constraints")
+                    for b in range(batch_size):
+                        outf.write(lengthwise_best_prediction[b][0].strip().replace("\n", " ") + "\n")
+                        outf.flush()
+                        outallsatf.write(str(lengthwise_best_prediction[b][2]) + "\n")
+                        
+                        outallsatf.flush()
 
             del source_batch
             del target_batch
@@ -697,10 +797,14 @@ def main(args):
             for_predicted_source_batch = []
             additional_batch = []
             predicted_batch = []
-    f.close()
+
+    if args.outfile is not None:
+        outf.close()
+        outallsatf.close()
     print("average numbers of steps to converge =", np.mean(all_stepcounts))
 
 def clean_output(tokens, eos_token_id, return_tensors=False):
+    # print(tokens)
     new_tokens = []
     for tok in tokens:
         if tok != eos_token_id:

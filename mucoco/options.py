@@ -11,7 +11,8 @@ def get_parser():
         "--additional-data", default=None, type=str, help="path of additional data used in some losses"
     )
     parser.add_argument("--max-length", default=None, type=int, help="L: the sentence length you want to predict at every step. Use this for models which have no padding/trained while also predicting the padding. Not used in experiments reported in the paper")
-    parser.add_argument("--max-allowed-length", default=20, type=int, help="This is the max length that will fit into the GPU, max_length <= max_allowed_length")
+    parser.add_argument("--max-prefix-length", default=50, type=int, help="L: the sentence length you want to predict at every step. Use this for models which have no padding/trained while also predicting the padding. Not used in experiments reported in the paper")
+    parser.add_argument("--max-allowed-length", default=50, type=int, help="This is the max length that will fit into the GPU, max_length <= max_allowed_length")
     parser.add_argument("--length_diff", default=0, type=int, help="change the length of the target by adding this value")
     parser.add_argument(
         "--model", default=None, type=str, help="path to the trained lm"
@@ -37,7 +38,7 @@ def get_parser():
     parser.add_argument("--debug", action="store_true", help="debug mode")
     parser.add_argument("--beam", action="store_true", help="do beam search ")
     parser.add_argument("--st", action="store_true", help="do straight through")
-    parser.add_argument("--gold_loss_epsilons", action="store_true", help="use gold loss as epsilons")
+    parser.add_argument("--gold-loss-epsilons", type=str, default="none", help="use gold loss as epsilons")
     parser.add_argument("--seed", default=None, type=int, help="random seed")
     parser.add_argument(
         "--log-interval", default=10, type=int, help="interval for logging"
@@ -105,7 +106,7 @@ def get_parser():
     parser.add_argument("--label-id", default="none", type=str, help="for classification losses, which is the label of interest")
     parser.add_argument("--suffix-source", default=None, type=str)
     parser.add_argument(
-        "--decode-temperature", default=1.0, type=float, help="softmax temperature"
+        "--decode-temperature", default=0.1, type=float, help="softmax temperature"
     )
     parser.add_argument(
         "--betas", default="1.0", type=str, help="weights for different loss components"
@@ -155,12 +156,15 @@ def get_parser():
 
     parser.add_argument("--batch-size", default=1, type=int)
     parser.add_argument("--model_dtype", default="fp32", help="fp32 or fp16")
-    parser.add_argument("--fp16_source", default="apex", help="apex or pytorch", choices=["apex", "pytorch"])
+    parser.add_argument("--fp16_source", default="pytorch", help="apex or pytorch", choices=["apex", "pytorch"])
     parser.add_argument(
         "--decay-method", default=None, help="how to decay the learning rate"
     )
     parser.add_argument("--half-lr", action="store_true", help="half the learning rate if the loss doesn't decrease for 20 steps")
-    parser.add_argument("--always_mucoco", action="store_true", help="half the learning rate if the loss doesn't decrease for 20 steps")
+    parser.add_argument("--always-mucoco", type=str, default="false", choices=["true", "false"], help="always use mucoco generated outputs (that is never pick beam search outputs even if the optimization fails)")
+    parser.add_argument("--same-embeds", action="store_true", help="use same embeddings for all models (used with target_type embeddings")
+    parser.add_argument("--metric", default="dot", type=str, help="metric to compute NN for target_type embeddings")
+    parser.add_argument("--loss-type", default="xentropy", type=str, help="")
     parser.add_argument(
         "--max-grad-norm", default=0.0, type=float, help="clip threshold of gradients"
     )
