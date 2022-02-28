@@ -3,39 +3,51 @@ import torch
 
 import torch.nn.functional as F
 
+import numpy as np
 
 def _get_scores(predict_emb, target_embedding):
     return predict_emb.matmul(target_embedding.weight.t())
 
-def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
+def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf'), filter_indices=[]):
     """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
         Args:
-            logits: logits distribution shape (vocabulary size)
-            top_k >0: keep only top k tokens with highest probability (top-k filtering).
-            top_p >0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
+            logits: logits distribution shape (batch size x vocabulary size)
+            top_k > 0: keep only top k tokens with highest probability (top-k filtering).
+            top_p > 0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
                 Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
+            filter_indices: do not predict the given set of indices.
+        From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
     """
-    logits = logits.clone().detach()
-    for i in range(logits.size(0)):
-        for j  in range(logits.size(1)):
-            top_k = min(top_k, logits[i, j].size(-1))  # Safety check
-            if top_k > 0:
-                # Remove all tokens with a probability less than the last token of the top-k
-                indices_to_remove = logits[i, j] < torch.topk(logits[i, j], top_k)[0][..., -1, None]
-                logits[i, j, indices_to_remove] = filter_value
+    top_k = min(top_k, logits.size(-1))  # Safety check
+    if top_p > 0.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        # print(sorted_indices)
+        
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > top_p
 
-            if top_p > 0.0:
-                sorted_logits, sorted_indices = torch.sort(logits[i, j], descending=True)
-                cumulative_probs = torch.cumsum(F.softmax(logits[i, j], dim=-1), dim=-1)
+        
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+        
+        # print(sorted_indices_to_remove, sorted_indices)
+        # scatter sorted tensors to original indexing
+        indices_to_remove = sorted_indices_to_remove.scatter(dim=1, index=sorted_indices, src=sorted_indices_to_remove)
+        # print(filter_value)
+        # print(indices_to_remove)
+        # input("topp")
+        logits[indices_to_remove] = filter_value
 
-                # Remove tokens with cumulative probability above the threshold
-                sorted_indices_to_remove = cumulative_probs > top_p
-                # Shift the indices to the right to keep also the first token above the threshold
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
+    elif top_k > 0:
+        # Remove all tokens with a probability less than the last token of the top-k
+        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+        logits[indices_to_remove] = filter_value
+    
+    if len(filter_indices) > 0:
+        pass
 
-                indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                logits[i, j, indices_to_remove] = filter_value
     return logits
 
 class TargetSimplex(nn.Module):
@@ -49,9 +61,8 @@ class TargetSimplex(nn.Module):
         st=False,
         init_value=None,
         random_init=False,
-        sampling_strategy="argmax",
-        sampling_strategy_k = 0,
-        embed_scales=None
+        embed_scales=None,
+        **kwargs,
     ):
         super(TargetSimplex, self).__init__()
         # special = torch.Tensor(batch_size, sent_length, 3).fill_(-1000)
@@ -65,8 +76,8 @@ class TargetSimplex(nn.Module):
         self.initialize(random_init=random_init, init_value=init_value)
         self.device = device
         self.st = st
-        self.sampling_strategy = sampling_strategy
-        self.sampling_strategy_k = sampling_strategy_k
+        # self.sampling_strategy = sampling_strategy
+        # self.sampling_strategy_k = sampling_strategy_k
         self.embed_scales = embed_scales
     
     # def sanitize(self, tokenizer):
@@ -111,7 +122,7 @@ class TargetSimplex(nn.Module):
         return (source_pred_emb, target_pred_emb, softmax_pred_probs), predictions, pred_probs
     
 
-    def forward_multiple(self, embed_luts):
+    def forward_multiple(self, embed_luts, **kwargs):
         if self.temperature == 0: # no softmax, special case, doesn't work don't use
             pred_probs = self._pred_logits
         else:    
@@ -255,33 +266,54 @@ class TargetProbability(nn.Module): #this is the class used in the final results
         st=False,
         init_value=None,
         random_init=False,
-        sampling_strategy="argmax",
-        sampling_strategy_k = 0,
-        embed_scales=None
+        do_sample=False,
+        top_p=1.0,
+        top_k=0.0,
+        embed_scales=None,
+        max_steps=1,
     ):
         super(TargetProbability, self).__init__()
         self._pred_probs = nn.Parameter(torch.Tensor(batch_size, sent_length, vocabsize).to(device))
         self.initialize(random_init=random_init, init_value=init_value)
         self.device = device
         self.st = st #straight-through or not
-        self.sampling_strategy = sampling_strategy
-        self.sampling_strategy_k = sampling_strategy_k   
-        self.embed_scales = embed_scales      
+        self.do_sample = do_sample
+        self.top_p = top_p
+        self.top_k = top_k
+        self.embed_scales = embed_scales   
+        self.max_steps = max_steps
 
-    def forward_multiple(self, embed_luts):
+        self.begintemp = 10.0
+        self.finaltemp = 0.1
+        self.step = 0
+        self.tempschedule="geometric"
+        self.r = np.power(self.finaltemp/self.begintemp, 1/(self.max_steps-1))
+        
+
+    def forward_multiple(self, embed_luts, **kwargs):
         
         if self.embed_scales is None:
             embed_scales = [1.0 for i in embed_luts]
 
         pred_probs = self._pred_probs
-        if self.sampling_strategy == "greedy":
+        if not self.do_sample:
             _, index = pred_probs.max(-1, keepdim=True)
             predictions = index.squeeze(-1)
-        elif self.sampling_strategy == "notpad": #top-1 might be a <pad> token, this ensure pad is never sampled
-            _, index = pred_probs.topk(-1, k=2, keepdim=True)
-            predictions = index.squeeze(-1)
+        # elif self.sampling_strategy == "notpad": #top-1 might be a <pad> token, this ensure pad is never sampled
+        #     _, index = pred_probs.topk(-1, k=2, keepdim=True)
+        #     predictions = index.squeeze(-1)
         else:
-            raise ValueError("wrong sampling strategy")
+            temperature = self.begintemp * pow(self.r, self.step)
+            pred_logits = torch.log(pred_probs)
+            next_token = torch.empty((pred_logits.size(0), pred_logits.size(1))).long().to(pred_logits.device)
+            for i in range(pred_logits.size(1)):
+                filtered_logits = top_k_top_p_filtering(pred_logits[:, i, :]/temperature, self.top_k, self.top_p)
+                next_token[:, i] = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1)
+
+            self.step += 1
+            predictions = next_token
+            index = next_token.unsqueeze(2)
+            
         
         softmax_pred_probs = pred_probs
         if self.st:
@@ -334,6 +366,8 @@ class TargetEmbeddings(nn.Module):
         embed_scales=None,
         metric="dot",
         same_embed=True,
+        final_bias=None,
+        eos_token_id=None
     ):
         super(TargetEmbeddings, self).__init__()
         self._pred_embeds = nn.Parameter(torch.Tensor(batch_size, sent_length, embed_dim).to(device))
@@ -345,74 +379,70 @@ class TargetEmbeddings(nn.Module):
         self.metric=metric   
         self.same_embed=same_embed
         self.temperature=0.1
-        
+        self.eos_token_id = eos_token_id
         
         if self.metric == "cosine":
             self.tgt_emb = torch.nn.functional.normalize(embed_lut.weight.data, p=2, dim=-1)
         else:
             self.tgt_emb = embed_lut.weight.data
         
+        if final_bias is not None:
+            self.final_bias = final_bias.data
+        else:
+            self.final_bias = None
+        
         self.initialize(random_init=random_init, init_value=init_value)
+        print(self.eos_token_id)
 
-    def forward_multiple(self, embed_luts):
+    def forward_multiple(self, embed_luts, new_predictions=None, **kwargs):
         if self.same_embed:
             embed_luts = [embed_luts[0] for _ in embed_luts] #need to verify
         
         if self.embed_scales is None:
             embed_scales = [1.0 for i in embed_luts]
+  
+        predictions = new_predictions        
+        if predictions is None:
+            pred_logits = _emb_to_scores(self.metric, self._pred_embeds, self.tgt_emb, self.final_bias)
+            pred_probs = pred_logits#F.softmax(pred_logits / self.temperature, dim=-1)
+            _, predictions = pred_logits.max(-1) 
+            softmax_pred_probs = pred_probs     # not used
 
-        pred_embeds = self._pred_embeds    
-        pred_logits = _emb_to_scores(self.metric, pred_embeds, self.tgt_emb)
-        
-        pred_probs = F.softmax(pred_logits / self.temperature, dim=-1)
-        _, index = pred_probs.max(-1, keepdim=True)
-        predictions = index.squeeze(-1)
-        
-        softmax_pred_probs = pred_probs
-        # if self.st:
-        #     y_hard = torch.zeros_like(pred_probs).scatter_(-1, index, 1.0)
-        #     pred_probs = y_hard - pred_probs.detach() + pred_probs
-        
-        # pred_embs = []
-        # for embed_lut, embed_scale in zip(embed_luts, self.embed_scales):
-        #     pred_embs.append((pred_probs.unsqueeze(-1) * embed_lut.weight).sum(dim=-2))
-        
-        # return (pred_embs, ), predictions, (pred_probs, softmax_pred_probs) #pred_probs is actually just logits
-
-        # 
-        
-        y_hard = torch.zeros_like(pred_probs).scatter_(-1, index, 1.0)
-        # pred_probs = y_hard
-        # # softmax_pred_probs = pred_probs
-        # softmax_pred_probs = None
+            # eos_true = predictions.eq(self.eos_token_id)
+            # if eos_true.any():
+            #     eos_mask = eos_true.float().cumsum(dim=-1).eq(0).long()
+            #     print(eos_mask)
+            #     input()
+            # else:
+            #     eos_mask = torch.ones_like(eos_true).long().to(self.device)
+            # all_eos = torch.empty_like(predictions).fill_(self.eos_token_id)
+            # predictions = eos_mask * predictions + (1 - eos_mask) * all_eos
+        else:
+            pred_probs, softmax_pred_probs = None, None
 
         pred_embs = []
         if self.st:
-            pred_probs = y_hard - pred_probs.detach() + pred_probs
+            # y_hard = torch.zeros((self._pred_embeds.size(0), self._pred_embeds.size(1), self.tgt_out_emb.size(0))).scatter_(-1, predictions.unsqueeze(-1), 1.0)
+            # pred_probs = y_hard - pred_probs.detach() + pred_probs
             for embed_lut, embed_scale in zip(embed_luts, self.embed_scales):
                 n_pred_embs = embed_lut(predictions)
-                pred_embs.append(pred_embeds + (n_pred_embs-pred_embeds).detach())
+                replace_mask = predictions.unsqueeze(2).ne(self._pred_ids).float()
+                # print(replace_mask)
+                self._pred_embeds.data.copy_((replace_mask * n_pred_embs +  (1. - replace_mask) * self._pred_embeds).data)
+                pred_embs.append(self._pred_embeds + (n_pred_embs-self._pred_embeds).detach())
+                # input()
         else:
             for embed_lut, embed_scale in zip(embed_luts, self.embed_scales):
-                pred_embs.append(pred_embeds)
+                pred_embs.append(self._pred_embeds)
         
-        # # pred_embs = []
-        # # for embed_lut, embed_scale in zip(embed_luts, self.embed_scales):
-        # #     if embed_lut.weight.size(0) > pred_probs.size(2):
-        # #         pred_embs.append((pred_probs.unsqueeze(-1) * embed_lut.weight[:pred_probs.size(2), :]).sum(dim=-2))
-        # #     elif embed_lut.weight.size(0) < pred_probs.size(2):
-        # #         pred_embs.append((pred_probs[:, :, :embed_lut.weight.size(0)].unsqueeze(-1) * embed_lut.weight).sum(dim=-2))
-        # #     else:
-        # #         pred_embs.append((pred_probs.unsqueeze(-1) * embed_lut.weight).sum(dim=-2))
-
-        return (pred_embs, self._pred_embeds), predictions, (pred_probs, softmax_pred_probs) #pred_probs is actually just logits
+        return (pred_embs, self._pred_embeds), predictions, (pred_probs, softmax_pred_probs)
 
 
-    def initialize(self, random_init=False, init_value=None):
+    def initialize(self, random_init=False, init_value=None, ):
         if init_value is not None:
-            self._pred_embeds.data.copy_(init_value_.data)
-        elif random_init: 
-           torch.nn.init.normal_(self._pred_embeds, 0, 1.0)
+            self._pred_embeds.data.copy_(init_value.data)
+        elif random_init:
+           torch.nn.init.normal_(self._pred_embeds, 0.0, 1.0)
         else: # uniform
             # vocabsize = self.tgt_emb.size(0)
             # uniform = torch.ones((self._pred_embeds.size(0), self._pred_embeds.size(1), vocabsize)).to(self.device)/vocabsize
@@ -425,22 +455,34 @@ class TargetEmbeddings(nn.Module):
             # print(torch.linalg.norm(self.tgt_emb, dim=-1).min(-1))
             # input()
             torch.nn.init.zeros_(self._pred_embeds)
+        
+        _, self._pred_ids = _emb_to_scores(self.metric, self._pred_embeds, self.tgt_emb, self.final_bias).max(dim=-1, keepdim=True)
+
+
+
+            # proj = self._pred_embeds.matmul(self.tgt_emb.t())
+            # projembds = proj.max(dim=-1)[0]
+            # self._pred_embeds.data.copy_(projembds.data)
             
         
     def printparams(self):
         print(self._pred_embeds)
 
 
-def _emb_to_scores(metric, pred_emb, tgt_out_emb):
+def _emb_to_scores(metric, pred_emb, tgt_out_emb, bias=None, norm=None):
     if metric == "l2": 
-        scores = (pred_emb.unsqueeze(2) - tgt_out_emb.unsqueeze(0))
-        scores = -(scores*scores).sum(dim=-1)
+        return -torch.cdist(pred_emb, tgt_out_emb.unsqueeze(0))
+        # scores = (pred_emb.unsqueeze(2) - tgt_out_emb.unsqueeze(0))
+        # scores = -(scores*scores).sum(dim=-1)
 
     elif metric == "cosine": # cosine and vmf work more or less the same for decoding
         pred_emb_unitnorm = torch.nn.functional.normalize(pred_emb, p=2, dim=-1)
-        # target_unitnorm = torch.nn.functional.normalize(tgt_out_emb.weight, p=2, dim=-1)
-        scores = pred_emb_unitnorm.matmul(tgt_out_emb.t())
+        target_unitnorm = torch.nn.functional.normalize(tgt_out_emb, p=2, dim=-1)
+        scores = pred_emb_unitnorm.matmul(target_unitnorm.t())
     
+    elif metric == "dotbias":
+        return pred_emb.matmul(tgt_out_emb.t()) + bias
+
     else: # dot product
         return pred_emb.matmul(tgt_out_emb.t())
     

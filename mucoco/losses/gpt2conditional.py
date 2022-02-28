@@ -52,7 +52,7 @@ class GPT2ConditionalLoss(BaseLoss):
             lm_logprobs = F.log_softmax(lm_logits, dim=-1)
 
             if prefix.size(1) > 0:
-                xentropy_prefix = F.nll_loss(lm_logprobs[:,:prefix.size(1),:].squeeze(0), prefix.squeeze(0), reduction="none").sum(dim=-1)
+                xentropy_prefix = F.nll_loss(lm_logprobs[:,:prefix.size(1),:].squeeze(0), prefix.squeeze(0), reduction="none").unsqueeze(0).sum(dim=-1)
             else:
                 xentropy_prefix = 0.0
             
@@ -75,7 +75,7 @@ class GPT2ConditionalLoss(BaseLoss):
                 "lm_logprobs": lm_logprobs.data.cpu(),
                 "mm": mm,
             }
-        elif losstype in ["l2", "cosine", "dot", "dotplusplus"]:
+        elif losstype in ["l2", "cosine", "dot", "dotplusplus", "detachdot"]:
             model_output = self.model.transformer(inputs_embeds=input_embeds, token_type_ids=segment)
             
             hidden_states = model_output[0][:, source.size(1) + pad_length:-1, :]
@@ -96,11 +96,21 @@ class GPT2ConditionalLoss(BaseLoss):
                 loss = loss.sum(dim=-1)
                 # loss = (-hidden_states * pred_embs).sum(dim=-1).sum(dim=-1)
             
+            elif losstype == "detachdot":
+                hidden_states = hidden_states.contiguous()
+                pred_embs = input_embeds[:, source.size(1)+pad_length+1:, :].contiguous()
+                loss = -(hidden_states.detach() * pred_embs).sum(dim=-1)
+                loss += torch.logsumexp(hidden_states.matmul(embed_lut.weight.t()), dim=-1).detach()
+                # loss += torch.log(torch.exp(hidden_states.matmul(embed_lut.weight.t())).sum(dim=-1))
+                loss = loss.sum(dim=-1)
+                # loss = (-hidden_states * pred_embs).sum(dim=-1).sum(dim=-1)
+
             elif losstype == "dotplusplus":
                 hidden_states = hidden_states.contiguous()
                 pred_embs = input_embeds[:, source.size(1)+pad_length+1:, :].contiguous()
-                loss = -(hidden_states * pred_embs).sum(dim=-1)
-                loss += torch.log(torch.exp(hidden_states.matmul(embed_lut.weight.t())).sum(dim=-1))
+                loss = -(hidden_states.detach() * pred_embs).sum(dim=-1)
+                loss += torch.logsumexp(hidden_states.matmul(embed_lut.weight.t()), dim=-1).detach()
+                # loss += torch.log(torch.exp(hidden_states.matmul(embed_lut.weight.t())).sum(dim=-1))
                 loss = loss.sum(dim=-1)
                 # loss = (-hidden_states * pred_embs).sum(dim=-1).sum(dim=-1)
 
@@ -150,13 +160,13 @@ class GPT2ConditionalLoss(BaseLoss):
         losstype = getattr(self.args, "loss_type", "xentropy") 
         if losstype == "xentropy":
             model_output = self.model(input_tokens, token_type_ids=segment)
-            target = torch.cat([bos, target, eos, eos], dim=1)
+            target = torch.cat([bos, target, eos], dim=1)
 
             lm_logits = model_output[0][:, source.size(1)+pad_length:]
             lm_logprobs = F.log_softmax(lm_logits, dim=-1)
 
-            loss = F.nll_loss(lm_logprobs[:,:target.size(1) - 1,:].squeeze(0), target[:, 1:target.size(1)].squeeze(0), reduction="none").sum(dim=-1)
-            
+            loss = F.nll_loss(lm_logprobs[:,:target.size(1) - 1,:].squeeze(0), target[:, 1:target.size(1)].squeeze(0), reduction="none").unsqueeze(0).sum(dim=-1)
+
             if self.args.length_normalize:
                 loss /= lm_logprobs.size(1)
 
@@ -168,7 +178,7 @@ class GPT2ConditionalLoss(BaseLoss):
                 "nsentences": batch_size,
                 "mm": mm,
             }
-        elif losstype in ["l2", "cosine", "dot", "dotplusplus"]:
+        elif losstype in ["l2", "cosine", "dot", "dotplusplus", "detachdot"]:
             model_output = self.model.transformer(input_tokens, token_type_ids=segment)
             hidden_states = model_output[0][:, source.size(1)+pad_length:]
             input_embeds = self.model.get_input_embeddings()(input_tokens)
@@ -190,13 +200,15 @@ class GPT2ConditionalLoss(BaseLoss):
                 # loss += torch.log(torch.exp(hidden_states.matmul(self.model.get_input_embeddings().weight.t())).sum(dim=-1))
                 loss = loss.sum(dim=-1)
             
-            elif losstype == "dotplusplus":
+            elif losstype == "dotplusplus" or losstype == "detachdot":
                 hidden_states = hidden_states[:, :-1, :].contiguous()
                 pred_embs = input_embeds[:, source.size(1)+pad_length+1:, :].contiguous()
 
                 loss = -(hidden_states * pred_embs).sum(dim=-1)
-                loss += torch.log(torch.exp(hidden_states.matmul(self.model.get_input_embeddings().weight.t()).sum(dim=-1)))
+                loss += torch.logsumexp(hidden_states.matmul(self.model.get_input_embeddings().weight.t()), dim=-1)
+                # loss += torch.log(torch.exp(hidden_states.matmul(self.model.get_input_embeddings().weight.t()).sum(dim=-1)))
                 loss = loss.sum(dim=-1)
+            
 
             else:
                 hidden_states = hidden_states[:, :-1, :].contiguous()

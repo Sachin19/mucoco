@@ -3,6 +3,7 @@ import importlib
 import os
 
 from mucoco.losses.base_loss import BaseLoss
+from mucoco.losses.model_wrapper import ModelWrapper
 
 LOSS_REGISTRY = {}
 

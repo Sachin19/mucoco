@@ -5,11 +5,13 @@ from torch.nn.utils import clip_grad_norm_
 import operator
 import functools
 from copy import copy
-from math import sqrt
+from math import sqrt, pow
 import types
 import importlib
 import math
 import numpy as np
+
+import torch.nn.functional as F
 # from onmt.utils.misc import fn_args
 
 import logging
@@ -32,13 +34,17 @@ def build_torch_optimizer(model, opt):
     if opt.optim == "sgd":
         optimizer = optim.SGD(list(params), lr=opt.lr, momentum=opt.sgd_momentum, nesterov=opt.sgd_nesterov, weight_decay=opt.weight_decay)
     elif opt.optim == "expgd":
-        optimizer = ExpGD(list(params), lr=opt.lr, mw=opt.expgd_mw)
+        optimizer = ExpGD(list(params), lr=opt.lr, mw=opt.expgd_mw, momentum=opt.expgd_momentum)
+    elif opt.optim == "embedgd":
+        optimizer = EmbedGD(list(params), lr=opt.lr, momentum=opt.embedgd_momentum, embed_lut=model.tgt_emb, max_steps=opt.optim_steps, lr_pattern=opt.embedgd_lr_pattern, final_bias=model.final_bias, do_sample=opt.embedgd_do_sample == "true", top_p=opt.embedgd_top_p, top_k=opt.embedgd_top_k, noise_variance=opt.embedgd_noise_variance, gumbel_noise_max=opt.embedgd_gumbel_noise_max, repetition_penalty=opt.repetition_penalty, begintemp=opt.embedgd_begin_temperature, finaltemp=opt.embedgd_final_temperature, temp_reduction_steps=opt.embedgd_temperature_reduction_steps, grad_distance=opt.embedgd_grad_distance, time_decay_method=opt.embedgd_decay_method, step_decay_method=opt.embedgd_lr_pattern)
     elif opt.optim == "sgld":
         optimizer = SGLD(list(params), lr=opt.lr, num_burn_in_steps=50)
     elif opt.optim == "lbfgs":
         optimizer = optim.LBFGS(list(params), lr=opt.lr)
     elif opt.optim == "ascentsgd":
         optimizer = optim.SGD(list(params), lr=opt.lambda_lr)
+    elif opt.optim == "gradascent":
+        optimizer = GradAscent(list(params), lr=opt.lambda_lr)
     elif opt.optim == "rmsprop":
         optimizer = torch.optim.RMSprop(list(params), lr=opt.lr)
     elif opt.optim == "adagrad":
@@ -341,7 +347,7 @@ class Optimizer(object):
         """Zero the gradients of optimized parameters."""
         self._optimizer.zero_grad(set_to_none=set_to_none)
 
-    def backward(self, loss, retain_graph=False, scaler=None):
+    def backward(self, loss, retain_graph=False, scaler=None, entropy=None):
         """Wrapper for backward pass. Some optimizer requires ownership of the
         backward pass."""
         if scaler is not None:
@@ -359,7 +365,7 @@ class Optimizer(object):
         else:
             loss.backward(retain_graph=retain_graph)
 
-    def step(self, no_improvement=False, scaler=None):
+    def step(self, no_improvement=False, scaler=None, entropy=None):
         """Update the model parameters based on current gradients.
 
         Optionally, will employ gradient modification or update learning
@@ -382,17 +388,25 @@ class Optimizer(object):
                 scaler.unscale_(self._optimizer)
                 clip_grad_norm_(group["params"], self._max_grad_norm)
             elif self._fp16 is None and self._max_grad_norm > 0 and not self.ascent:
-                clip_grad_norm_(group["params"], self._max_grad_norm)
-
-            # for p in group['params']:
-            #     param_norm = p.grad.data.norm(2, -1).sum(dim=0)
-            #     print(param_norm)
-            # input()
+                # clip_grad_norm_(group["params"], self._max_grad_norm)
+                for p in group['params']:
+                    param_norm = p.grad.data.norm(2, -1).sum(dim=0)
+                    # print(p.size())
+                    coeff = torch.clamp(self._max_grad_norm / param_norm, max=1.0)
+                    # print(coeff)
+                    p.grad.detach().mul_(coeff.to(p.grad.device).unsqueeze(0).unsqueeze(2))
+                    # print(param_norm)
+                    # param_norm = p.grad.data.norm(2, -1).sum(dim=0)
+                    # print(param_norm)
+                # input()
         
         # for group in self._optimizer.param_groups:
         #     print(group["lr"])
         if scaler is None:
-            self._optimizer.step()
+            if entropy is not None:
+                self._optimizer.step(entropy=entropy)
+            else:
+                self._optimizer.step()
         else:
             scaler.step(self._optimizer)
             scaler.update()
@@ -1138,10 +1152,7 @@ class SGLD(torch.optim.Optimizer):
             raise ValueError("Invalid num_burn_in_steps: {}".format(num_burn_in_steps))
 
         defaults = dict(
-            lr=lr, precondition_decay_rate=precondition_decay_rate,
-            num_pseudo_batches=num_pseudo_batches,
-            num_burn_in_steps=num_burn_in_steps,
-            diagonal_bias=1e-8,
+            lr=lr,
         )
         super().__init__(params, defaults)
 
@@ -1160,46 +1171,15 @@ class SGLD(torch.optim.Optimizer):
 
                 state = self.state[parameter]
                 lr = group["lr"]
-                num_pseudo_batches = group["num_pseudo_batches"]
-                precondition_decay_rate = group["precondition_decay_rate"]
                 gradient = parameter.grad.data
 
                 #  State initialization {{{ #
 
                 if len(state) == 0:
-                    state["iteration"] = 0
-                    state["momentum"] = torch.ones_like(parameter)
+                    state["step"] = 0
 
-                #  }}} State initialization #
-
-                state["iteration"] += 1
-
-                momentum = state["momentum"]
-
-                #  Momentum update {{{ #
-                momentum.add_(
-                    (1.0 - precondition_decay_rate) * ((gradient ** 2) - momentum)
-                )
-                #  }}} Momentum update #
-
-                if state["iteration"] > group["num_burn_in_steps"]:
-                    sigma = 1. / torch.sqrt(torch.tensor(lr))
-                else:
-                    sigma = torch.zeros_like(parameter)
-
-                preconditioner = (
-                    1. / torch.sqrt(momentum + group["diagonal_bias"])
-                )
-
-                scaled_grad = (
-                    0.5 * preconditioner * gradient * num_pseudo_batches +
-                    torch.normal(
-                        mean=torch.zeros_like(gradient),
-                        std=torch.ones_like(gradient)
-                    ) * sigma * torch.sqrt(preconditioner)
-                )
-
-                parameter.data.add_(-lr * scaled_grad)
+                state["step"] += 1
+                parameter.data.add_(-lr * gradient)
 
         return loss
 
@@ -1209,7 +1189,7 @@ class ExpGD(torch.optim.Optimizer):
     def __init__(self,
                  params,
                  lr=1e-2,
-                 mw=1, momentum=0.9) -> None:
+                 mw=1, momentum=0.0) -> None:
         """ Set up a SGLD Optimizer.
 
         Parameters
@@ -1321,9 +1301,12 @@ class ExpGD(torch.optim.Optimizer):
                     lastgrad = state['lastgrad']
                     step = state['step']
                     grad = (momentum * lastgrad + lr * gradient)
-                    unnormalized = parameter.data.mul_(torch.exp(-grad))
+                    logits = torch.log(parameter.data) - grad
+                    # unnormalized = parameter.data.mul_(torch.exp(1-grad))
                     # print(unnormalized)
-                    parameter.data.div_(unnormalized.sum(dim=-1, keepdims=True))
+                    logits = logits - logits.max(dim=-1, keepdims=True)[0]
+                    # parameter.data.div_(unnormalized.sum(dim=-1, keepdims=True))
+                    parameter.data.copy_(F.softmax(logits, dim=-1))
 
                     state['step'] += 1
                     state['lastgrad'] = grad
@@ -1354,3 +1337,401 @@ class ExpGD(torch.optim.Optimizer):
                 # input()
 
         return loss
+
+class GradAscent(torch.optim.Optimizer):
+    
+    def __init__(self, params, lr=1.0):
+        defaults = dict(
+            lr=lr,
+        )
+        
+        self.set_mask(torch.ones_like(params[0]))
+        super().__init__(params, defaults)
+    
+    def set_mask(self, mask):
+        self.mask = mask
+    
+    def step(self):
+        for group in self.param_groups:
+            for parameter in group["params"]:
+                
+                if parameter.grad is None:
+                    continue
+
+                state = self.state[parameter]
+                gradient = parameter.grad.data
+
+                parameter.data.add_(self.mask * group['lr'] * gradient)
+
+
+class EmbedGD(torch.optim.Optimizer):
+    """ Embedding Gradient Descent
+    """
+    def __init__(self,
+                 params,
+                 lr=1e-2,
+                 embed_lut=None,
+                 momentum=0.0,
+                 final_bias=None,
+                 lr_pattern="constant",
+                 max_steps=50,
+                 do_sample=False,
+                 noise_variance=0.0,
+                 gumbel_noise_max=0.0,
+                 top_p=1.0,
+                 top_k=0.0,
+                 repetition_penalty=0.0,
+                 begintemp=1.0,
+                 finaltemp=0.01,
+                 temp_reduction_steps=20,
+                 grad_distance="dot",
+                 step_decay_method="constant",
+                 time_decay_method="constant") -> None:
+        """ Set up a  Optimizer.
+
+        Parameters
+        ----------
+        params : iterable
+            Parameters serving as optimization variable.
+        lr : float, optional
+            Base learning rate for this optimizer.
+            Must be tuned to the specific function being minimized.
+            Default: `1e-2`.
+        precondition_decay_rate : float, optional
+            Exponential decay rate of the rescaling of the preconditioner (RMSprop).
+            Should be smaller than but nearly `1` to approximate sampling from the posterior.
+            Default: `0.95`
+        num_pseudo_batches : int, optional
+            Effective number of minibatches in the data set.
+            Trades off noise and prior with the SGD likelihood term.
+            Note: Assumes loss is taken as mean over a minibatch.
+            Otherwise, if the sum was taken, divide this number by the batch size.
+            Default: `1`.
+        num_burn_in_steps : int, optional
+            Number of iterations to collect gradient statistics to update the
+            preconditioner before starting to draw noisy samples.
+            Default: `3000`.
+        diagonal_bias : float, optional
+            Term added to the diagonal of the preconditioner to prevent it from
+            degenerating.
+            Default: `1e-8`.
+
+        """
+        if lr < 0.0:
+            raise ValueError("Invalid learning rate: {}".format(lr))
+        
+        self.base_lr = lr
+        seqlen = params[0].size(1)
+        self.lr_pattern = lr_pattern
+        self.seqlen = seqlen
+        self.lrs = get_pattern(lr, seqlen, lr_pattern)
+        coeff_steps = 200
+        freq = max(1, coeff_steps // seqlen)
+        self.max_updates = max_steps
+        self.temp_reduction_steps = temp_reduction_steps
+        self.do_sample = do_sample
+        self.top_k = top_k
+        self.top_p = top_p #for nucleus sampling (default is 0, just take argmin), this is totally random and has almost 0 chance of working
+        self.noise_variance = noise_variance #add normal noise to param_t centered at 0, with this variance
+        self.gumbel_noise_max = gumbel_noise_max
+        self.new_predictions = None
+
+        self.begintemp = begintemp
+        self.finaltemp = finaltemp
+        self.r = pow(self.finaltemp/self.begintemp, 1/(self.temp_reduction_steps-1))
+
+        self.repetition_penalty = repetition_penalty
+        self.grad_distance = grad_distance
+
+        self.time_decay_method = time_decay_method
+        self.step_decay_method = step_decay_method
+        self.warmup_steps = seqlen
+        self.min_lr = 0.1
+        ## different temperatures for different steps (decrease later step temperatures slower to avoid repetitions which are happening)
+        # step_size = (self.temp_reduction_steps - int(self.temp_reduction_steps * 0.2) - 10)/seqlen
+        # self.finalsteps = [int(10 + l*step_size) for l in range(seqlen)]
+        # self.finalsteps = list(range(10, seqlen, int((self.temp_reduction_steps-10)/seqlen)))
+        # print(self.finalsteps)
+        # self.rlist = [pow(self.finaltemp/self.begintemp, 1/(finalstep-1)) for finalstep in self.finalsteps]
+        # print(self.rlist)
+        # print(len(self.rlist))
+        # print(self.finalsteps)
+        # input()
+        if self.grad_distance == "cosine":
+            embed_lut = F.normalize(embed_lut, p=2, dim=-1)
+        if self.grad_distance == "l2":
+            self.embed_lut_norm = torch.square(torch.norm(embed_lut, p=2, dim=-1))
+        defaults = dict(
+            lr=lr,
+            embed_lut=embed_lut,
+            final_bias=final_bias,
+            freq=freq,
+            seqlen=seqlen,
+            momentum=momentum
+        )
+
+        super().__init__(params, defaults)
+
+    def __setstate__(self, state):
+        super(EmbedGD, self).__setstate__(state)
+    
+    def get_current_lr(self):
+        return self.base_lr
+
+    def update_lr(self, lr):
+        self.base_lr = lr
+        self.lrs = get_pattern(lr, self.seqlen, self.lr_pattern)
+
+        return lr
+
+    def step(self, entropy=None):
+        loss = None
+
+        for group in self.param_groups:
+            for parameter in group["params"]:
+                
+                if parameter.grad is None:
+                    continue
+
+                state = self.state[parameter]
+                gradient = parameter.grad.data
+
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['nu'] = 0
+                    state['s'] = 0
+
+                lr = group["lr"]
+                embed_lut = group["embed_lut"]
+                final_bias = group["final_bias"]
+                momentum = group['momentum']
+                freq = group['freq']
+                seqlen = group['seqlen']
+                timestep = state['step']
+                nu = state['nu']
+                s = state['s']
+
+                lrs = torch.Tensor(self.lrs[-seqlen-timestep//freq:len(self.lrs)-min(timestep, freq*seqlen-1)//freq]).to(gradient.device).unsqueeze(0).unsqueeze(2)
+                # print(lrs[0, :, 0])
+                # input()
+                # lrs = self.get_learning_rates(timestep, seqlen).to(gradient.device).unsqueeze(0).unsqueeze(2)
+                # print(lrs)
+                # print(lrs)
+                # print(entropy.size(), lrs.size())
+                # lrs = (lrs / entropy.unsqueeze(2))).clamp(min=0.5, max=1.0)
+                # print(lrs)
+                # if timestep > self.warmup_steps:
+                #     self.finaltemp = 0.9
+                #     self.r = pow(self.finaltemp/self.begintemp, 1/(self.temp_reduction_steps-1))
+                #     scale = max(self.finaltemp, self.begintemp * pow(self.r, timestep))
+                #     lrs = scale * lrs
+                    # d = (self.min_lr - lrs)/(self.max_updates - self.warmup_steps)
+                    # lrs = (lrs + (timestep - self.warmup_steps) * d).clamp(min=0.5)
+                    # # print(lrs)
+                noise = 0.0
+                if self.noise_variance >= 1e-6:
+                    noise = torch.empty_like(gradient).normal_(mean=0,std=1)  #TODO schedule
+                    noise_std = max(self.finaltemp, self.begintemp * pow(self.r, timestep))
+                    noise = torch.sqrt(2*lrs) * noise * noise_std
+                
+                # s = s + torch.square(gradient.detach())
+                # sepsilon = 1e-8
+                # print(s.size(), gradient.size())
+
+                # nu = momentum * nu + lrs * (gradient/torch.sqrt(s+sepsilon))
+                # print(torch.norm(gradient, p=2, dim=-1))
+
+                nu = momentum * nu + lrs * gradient
+                # print("hola", nu, parameter.data, noise)
+                if self.grad_distance == "dot":
+                    temp = nu - parameter.data - noise
+                    objective = temp.matmul(embed_lut.t())
+                    # print(objective)
+                elif self.grad_distance == "cosine":
+                    dist = 1 - F.normalize(parameter.data, p=2, dim=-1).matmul(embed_lut.t())
+                    objective = (nu - noise).matmul(embed_lut.t()) + dist
+                elif self.grad_distance == "l1":
+                    # temp = nu - parameter.data - noise
+                    # objective_old = temp.matmul(embed_lut.t())
+                    dist = torch.cdist(parameter.data, embed_lut.unsqueeze(0), p=1)
+                    objective = (nu - noise).matmul(embed_lut.t()) + 0.5 * dist
+                else:
+                    # temp = nu - parameter.data - noise
+                    # objective_old = temp.matmul(embed_lut.t())
+                    dist = torch.cdist(parameter.data, embed_lut.unsqueeze(0))
+                    objective = (nu - noise).matmul(embed_lut.t()) + 0.5 * torch.square(dist)
+                # input()
+                # print(objective)
+                    
+                if final_bias is not None:
+                    objective = objective - final_bias
+
+                gumbelnoise = 0.0
+                if self.gumbel_noise_max >= 1e-6:
+                    gumbelnoise = torch.empty_like(objective).uniform_(0, 1) #TODO schedule
+                    noise_min = 1e-6
+                    noise_cap = max(noise_min, self.gumbel_noise_max - (step-1)*(self.gumbel_noise_max - noise_min)/self.temp_reduction_steps)
+                    gumbelnoise = -torch.sqrt(2*lrs) * torch.log(-torch.log(gumbelnoise)) * noise_cap
+                    # print(gumbelnoise.size())
+                    # print(gumbelnoise)
+
+                    logsoftobjective = F.log_softmax(objective, dim=-1)
+                    logsoftobjective += gumbelnoise
+
+                    objective =  logsoftobjective
+
+                if not self.do_sample: #argmin
+                    min_value, min_index = objective.min(dim=-1)
+                    next_token = min_index
+                    # print(next_token)
+                    # input()
+                else:
+                    print("whatthehola")
+                    input()
+                    # print(objective)
+                    # max_value, max_index = (-objective).max(dim=-1, keepdim=True)
+                    # objective = -objective-max_value 
+                    
+                    # input()
+                    
+                    # temperature = max(finaltemp, begintemp - (step-1)*(begintemp-finaltemp)/self.temp_reduction_steps)
+                    temperature = max(self.finaltemp, self.begintemp * pow(self.r, step))
+                    temperature_vector = torch.ones((objective.size(-1),)).to(parameter.device)
+                    # temperatures = []
+                    next_token = torch.empty((objective.size(0), objective.size(1))).long().to(parameter.device)
+                    for i in range(objective.size(1)):
+                        # temperature = max(self.finaltemp, self.begintemp * pow(self.rlist[i], step))
+                        # print(self.rlist[i], step, pow(self.rlist[i], step), self.begintemp)
+                        # temperatures.append(temperature)
+                        # print(temperature_vector)
+                        # if self.top_k > 0 or self.top_p < 1.0:
+                        filtered_logits = top_k_top_p_filtering(objective[:, i, :]/(temperature*temperature_vector), self.top_k, self.top_p)
+                        # else:
+                        #     filtered_logits = objective[:, i, :]/(temperature*temperature_vector)
+                        #     filtered_logits = filtered_logits-filtered_logits.max(dim=-1)[0]
+                            
+                        
+                        next_token[:, i] = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1)
+                        temperature_vector[next_token[:, i]] = 1.0 + self.repetition_penalty
+                        # input()
+                    
+                    # print(temperatures)
+                    # input()
+
+                self.new_predictions = next_token
+                new_embeddings = F.embedding(next_token, embed_lut)
+                parameter.data.copy_(new_embeddings)
+
+                state['step'] += 1
+                state['nu'] = nu
+                state['s'] = s
+                    
+        return loss
+    
+    def get_learning_rates(self, t, l):
+        # step_decay_method is constant and others are not implemented at the moment
+        if self.time_decay_method == "constant":
+            lr = self.base_lr
+        elif self.time_decay_method == "linear":
+            if t <= self.warmup_steps:
+                lr = t*self.base_lr/self.warmup_steps
+            else:
+                lr = self.base_lr - (t-self.warmup_steps)/(self.max_updates-1)
+        elif self.time_decay_method == "rsqrt":
+            if t <= self.warmup_steps:
+                lr = t*self.base_lr/self.warmup_steps
+                
+            else:
+                decay_steps = 10
+                lr = self.base_lr / np.sqrt((t - self.warmup_steps + decay_steps) // decay_steps)
+        elif self.time_decay_method == "exp":
+            if t <= self.warmup_steps:
+                lr = t*self.base_lr/self.warmup_steps
+            else:
+                decay_steps = 10
+                lr = self.base_lr * np.exp(-t + self.warmup_steps)
+                self.base_lr / np.exp(max(t - warmup_steps + decay_steps, 0) // decay_steps)
+        return torch.Tensor([lr for _ in range(l)])
+            
+
+def get_pattern(base_lr:float, length:int, pattern:str, final_lr:float=None):
+    if pattern == "constant":
+        pyramid = [base_lr for _ in range(length)]
+        reverse_pyramid = [base_lr for _ in range(length)]
+        reverse_pyramid.reverse()
+    elif pattern == "linear":
+        scale = base_lr/length
+        pyramid = [base_lr-scale*i for i in range(length)]
+        reverse_pyramid = [base_lr-scale*i for i in range(length)]
+        reverse_pyramid.reverse()
+    elif pattern == "flat-linear":
+        scale = base_lr/(length-1)
+        reverse_pyramid = [base_lr-scale*i for i in range(length)]
+        reverse_pyramid.reverse()
+        pyramid = [base_lr for i in range(length)]
+    elif pattern == "geometric":
+        pyramid = [base_lr * (2**-i) for i in range(length)]
+        reverse_pyramid = [base_lr * (2**-i) for i in range(length)]
+        reverse_pyramid.reverse()
+    elif pattern == "harmonic":
+        pyramid = [base_lr/(i+1) for i in range(length)]
+        reverse_pyramid = [base_lr/(i+1) for i in range(length)]
+        reverse_pyramid.reverse()
+    elif pattern == "rsqrt":
+        pyramid = [base_lr/np.sqrt(i+1) for i in range(length)]
+        reverse_pyramid = [base_lr/np.sqrt(i+1) for i in range(length)]
+        reverse_pyramid.reverse()
+    elif pattern == "block":
+        final_lr = 0.3
+        block_size = 10
+        pyramid = [base_lr for i in range(min(block_size, length))] + [final_lr for i in range(max(0, length-block_size))]
+        reverse_pyramid = [base_lr for i in range(min(block_size, length))] + [final_lr for i in range(max(0, length-block_size))]
+        reverse_pyramid.reverse()
+    return reverse_pyramid[:-1] + pyramid
+
+def safe_softmax(logits):
+    pass
+
+def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf'), filter_indices=[]):
+    """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
+        Args:
+            logits: logits distribution shape (batch size x vocabulary size)
+            top_k > 0: keep only top k tokens with highest probability (top-k filtering).
+            top_p > 0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
+                Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
+            filter_indices: do not predict the given set of indices.
+        From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
+    """
+    top_k = min(top_k, logits.size(-1))  # Safety check
+    if top_p > 0.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        # print(sorted_indices)
+        probs = F.softmax(sorted_logits, dim=-1)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > top_p
+
+        
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+        
+        # print(sorted_indices_to_remove, sorted_indices)
+        # scatter sorted tensors to original indexing
+        indices_to_remove = sorted_indices_to_remove.scatter(dim=1, index=sorted_indices, src=sorted_indices_to_remove)
+        # print(filter_value)
+        # print(indices_to_remove)
+        # input("topp")
+        logits[indices_to_remove] = filter_value
+
+    elif top_k > 0:
+        # Remove all tokens with a probability less than the last token of the top-k
+        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+        logits[indices_to_remove] = filter_value
+    
+    if len(filter_indices) > 0:
+        pass
+
+    return logits
+

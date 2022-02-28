@@ -6,7 +6,7 @@ import torch.nn as nn
 
 import logging
 
-@register_loss("classification")
+@register_loss("conditional_classification")
 class ClassificationLoss(BaseLoss):
 
     def __init__(self, model, tokenizer, args):
@@ -19,7 +19,6 @@ class ClassificationLoss(BaseLoss):
 
         self.bos_token_id = self.tokenizer.bos_token_id
         self.eos_token_id = self.tokenizer.eos_token_id    
-        # print(self.eos_token_id)
     
     def compute_loss(self, batch, preds, **kwargs):
         '''
@@ -37,34 +36,24 @@ class ClassificationLoss(BaseLoss):
 
         bos = torch.empty((source.size(0), 1)).long().to(self.device).fill_(self.bos_token_id)
         eos = torch.empty((source.size(0), 1)).long().to(self.device).fill_(self.eos_token_id)
+
         #input_tokens = torch.cat([bos, prefix, pred_tokens, eos], dim=1)
 
         embed_lut = self.model.get_input_embeddings()
         if isinstance(embed_lut, nn.Sequential):
-            input_embeds = torch.cat([embed_lut(source), embed_lut(prefix), embed_lut[1](pred_embeds), embed_lut(eos), embed_lut(eos)], dim=1) * kwargs["embed_scale"]
+            input_embeds = torch.cat([embed_lut(bos), embed_lut(prefix), embed_lut[1](pred_embeds)], dim=1) * kwargs["embed_scale"]
         else:
-            input_embeds = torch.cat([embed_lut(source), embed_lut(prefix), pred_embeds, embed_lut(eos), embed_lut(eos)], dim=1) * kwargs["embed_scale"]
-        # if isinstance(embed_lut, nn.Sequential):
-        #     input_embeds = torch.cat([embed_lut[1](pred_embeds), embed_lut(eos), embed_lut(eos)], dim=1) * kwargs["embed_scale"]
-        # else:
-        #     input_embeds = torch.cat([pred_embeds, embed_lut(eos), embed_lut(eos)], dim=1) * kwargs["embed_scale"]
+            input_embeds = torch.cat([embed_lut(bos), embed_lut(prefix), pred_embeds], dim=1) * kwargs["embed_scale"]
         
 
         model_output = self.model(inputs_embeds=input_embeds)
         lm_logits = model_output[0]
         lm_logprobs = F.log_softmax(lm_logits, dim=-1)
         label_id = kwargs.get("label_id", 1)
-        # loss = -lm_logprobs[:, label_id]
-
-        loss = lm_logits[:, 1-label_id] - lm_logits[:, label_id]
-
-        # loss =  torch.log(1 + torch.exp(lm_logits[:, 1-label_id] - lm_logits[:, label_id]))
         # print("label",label_id)
-        # loss = -torch.log(1-torch.exp(lm_logprobs[:, 1-label_id])) #label_id = 0 or 1
-        # loss = torch.log(1 + torch.exp(-lm_logits[:, label_id])) - torch.log(1 + torch.exp(-lm_logits[:, 1-label_id]))
-        # loss = -torch.exp(lm_logprobs)[:, label_id]
+        loss = -lm_logprobs[:, label_id] #label_id = 1
 
-        label_prediction = lm_logits.argmax(dim=-1).item()
+        label_prediction = lm_logprobs.argmax(dim=-1).item()
 
         logging_output = {
             "loss": loss.data.cpu(),
@@ -83,14 +72,13 @@ class ClassificationLoss(BaseLoss):
 
         batch_size=target.size(0)
         eos = torch.empty((target.size(0), 1)).long().to(self.device).fill_(self.eos_token_id)
-        target = torch.cat([source, target], dim=1)
+        target = torch.cat([target, eos], dim=1)
     
         model_output = self.model(target)
         lm_logits = model_output[0]
         lm_logprobs = F.log_softmax(lm_logits, dim=-1)
         label_id=kwargs.get("label_id", 1)
-        # loss = -lm_logprobs[:, label_id] #label_id = 1
-        loss = lm_logits[:, 1-label_id] - lm_logits[:, label_id]
+        loss = -lm_logprobs[:, label_id] #label_id = 1
         label_prediction = lm_logprobs.argmax(dim=-1).item()
 
         logging_output = {
