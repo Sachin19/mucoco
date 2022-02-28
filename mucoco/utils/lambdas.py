@@ -7,10 +7,22 @@ class Lambda(torch.nn.Module): #multipliers for the constraints
 
     def forward(self):
         return self.lambda_
+    
+    def set_active(self, i, value):
+        satmask = value.lt(0.).float()
+
+        self.lambda_[i].data.copy_(self.lambda_[i].data * satmask.float().item())
+    
+    def is_zero(self):
+        return self.lambda_.lt(1e-6)
 
     def get_mask(self, i, damp):
         # if constraint is satified and lambda < damp, then don't use lambdas to update thetas
         return 1 - damp.ge(0.).float() * self.lambda_[i].data.le(damp).float()
+    
+    def get_active(self, i, value):
+        # if constraint is satified and lambda < damp, then don't use lambdas to update thetas
+        return 1 - value.ge(0.).float()
 
     def get_loss(self, i, damp, loss):
         return (self.lambda_[i] - damp) * loss
