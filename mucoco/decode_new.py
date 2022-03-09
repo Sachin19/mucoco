@@ -909,7 +909,7 @@ def main(args):
                                         # lambda_mask += sats.float()
 
                                         # if args.linear_scale != "true" and  len(losses) > 1 and args.dynamic_lambda_update:
-                                        lambda_mask = (1 - sats.float())
+                                            # lambda_mask = (1 - sats.float())
                                         # if step > args.lambda_update:
                                     
                                     # total_batchlossitem = total_batchloss.item()
@@ -918,8 +918,8 @@ def main(args):
                                         # print(abs(total_batchlossitem - dynamic_lambda_update_prev_loss))
                                     if dynamic_lambda_update_prev_loss is not None and abs(total_batchlossitem - dynamic_lambda_update_prev_loss) <= 1e-6:
                                         repeat_counts[0] += 1
-                                        # if args.linear_scale != "true" and  len(losses) > 1 and args.dynamic_lambda_update:
-                                        #     lambda_mask = (1 - sats.float())
+                                        if args.linear_scale != "true" and  len(losses) > 1 and args.dynamic_lambda_update:
+                                            lambda_mask = (1 - sats.float())
                                             # print("what now", total_batchlossitem, dynamic_lambda_update_prev_loss, constraint_values, sats.float())
                                             # if sats.all(): #constraints are satisfied
                                             #     update_lambda_condition = False
