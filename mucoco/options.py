@@ -258,7 +258,7 @@ def get_parser():
     parser.add_argument("--epsilon_warmup_steps", default=None, type=str)
     parser.add_argument("--epsilon_cooldown_steps", default=None, type=str)
     parser.add_argument("--epsilon_decay_functions", default=None, type=str)
-    parser.add_argument("--cache_dir", default=None, type=str)
+    parser.add_argument("--cache_dir", default="hf_cache", type=str)
     parser.add_argument(
         "--selection_criterion", default="primary_allsat", help="", choices=['weighted_sum', 'primary_allsat', "last", "mrr_allsat"] 
     ) #mrr = most recent repetition
