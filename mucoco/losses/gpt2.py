@@ -21,6 +21,11 @@ class GPT2Loss(BaseLoss):
         self.model.config.pad_token_id = self.model.config.eos_token_id # to remove the warning
         self.max_steps = args.coeff_steps
         self.coeff_schedule = args.coeff_pattern
+
+        if args.topic_target != "none":
+            self.extra_prefix = self.tokenizer.encode(args.topic_target+" "+args.topic_target, return_tensors="pt").to(self.device)
+        else:
+            self.extra_prefix = torch.LongTensor([[]]).to(self.device)
     
     def get_coeff(self, step, seq_len, sched="constant"):
         if step == 0:
@@ -68,18 +73,19 @@ class GPT2Loss(BaseLoss):
         batch_size = prompt.size(0)
         step = kwargs.get("step")
         
-        if kwargs.get("use_context", False):
-            # print("using context in the loss computation")
-            context = kwargs.get('context_batch').squeeze(1) #only one context for now
-        else:
-            context = torch.empty((batch_size, 0)).long().to(self.device)
+        # if kwargs.get("use_context", False):
+        #     # print("using context in the loss computation")
+        #     context = kwargs.get('context_batch').squeeze(1) #only one context for now
+        # else:
+        context = torch.empty((batch_size, 0)).long().to(self.device)
 
         eos = torch.empty((batch_size, 1)).long().to(self.device).fill_(self.eos_token_id) 
 
         embed_lut = self.model.get_input_embeddings()
         prompt = torch.cat([eos, prompt], dim=1)
-        input_tokens = torch.cat([prompt, prefix, pred_tokens, context, eos], dim=1)
-        input_embeds = torch.cat([embed_lut(prompt), embed_lut(prefix), pred_embeds, embed_lut(context), embed_lut(eos), embed_lut(eos)], dim=1)
+        # print(self.extra_prefix)
+        input_tokens = torch.cat([self.extra_prefix, prompt, prefix, pred_tokens, context, eos], dim=1)
+        input_embeds = torch.cat([embed_lut(self.extra_prefix), embed_lut(prompt), embed_lut(prefix), pred_embeds, embed_lut(context), embed_lut(eos), embed_lut(eos)], dim=1)
         preflen = prompt.size(1) + prefix.size(1) 
         predlen = pred_embeds.size(1)
         suflen = context.size(1) + 1
@@ -126,12 +132,17 @@ class GPT2Loss(BaseLoss):
                 loss = (1.0 - (hidden_states_unitnorm * pred_embs_unitnorm).sum(dim=-1)).sum(dim=-1)
             
             elif losstype == "dot":
-                hidden_states = hidden_states.contiguous()
-                pred_embs = input_embeds[:, source.size(1)+pad_length+1:, :].contiguous()
-                loss = -(hidden_states * pred_embs).sum(dim=-1)
-                # loss += torch.log(torch.exp(hidden_states.matmul(embed_lut.weight.t())).sum(dim=-1))
-                loss = loss.sum(dim=-1)
-                # loss = (-hidden_states * pred_embs).sum(dim=-1).sum(dim=-1)
+                k = kwargs.get("kweight")
+                step = kwargs.get("step")               
+                hidden_states = hidden_states[:, preflen-1:-1, :].contiguous()
+                pred_embs = input_embeds[:, preflen:, :].contiguous()
+                
+                loss = -(hidden_states * pred_embs).sum(dim=-1) 
+
+                coeff = self.get_coeff(step, hidden_states.size(1), sched=self.coeff_schedule)
+                loss = coeff * loss - (coeff * loss).detach() + loss.detach()
+                loss = loss.sum(dim=-1)         
+                
             
             elif losstype == "detachdot":
                 hidden_states = hidden_states[:, preflen-1:-1, :].contiguous()
@@ -318,11 +329,11 @@ class GPT2Loss(BaseLoss):
         prompt, target = batch
         batch_size = prompt.size(0)
         
-        if kwargs.get("use_context",False):
-            print("using context")
-            context = kwargs.get('context_batch').squeeze(1) #only one context for now
-        else:
-            context = torch.empty((batch_size, 0)).long().to(self.device)
+        # if kwargs.get("use_context",False):
+        #     print("using context")
+        #     context = kwargs.get('context_batch').squeeze(1) #only one context for now
+        # else:
+        context = torch.empty((batch_size, 0)).long().to(self.device)
         
         # eos = torch.empty((batch_size, context.size(1), 1)).long().to(self.device).fill_(self.eos_token_id) 
         # input_tokens = torch.cat([prompt.unsqueeze(1).expand(-1, context.size(1), -1), target.unsqueeze(1).expand(-1, context.size(1), -1), context, eos], dim=1)
@@ -453,7 +464,8 @@ class GPT2Loss(BaseLoss):
                 'do_sample': True,
                 'temperature': self.args.AR_temperature,
                 'top_k': self.args.AR_top_k,
-                'top_p': self.args.AR_top_p}
+                'top_p': self.args.AR_top_p,
+                'num_return_sequences': kwargs.get('num_return_sequences', 1)}
                 # 'pad_token_id':self.eos_token_id} 
         # print(return_object)
 

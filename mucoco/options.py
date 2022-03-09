@@ -8,7 +8,13 @@ def get_parser():
         "--data", default=None, type=str, help="path of source/target sentences"
     )
     parser.add_argument(
-        "--datastyle", default="text", type=str, choices=["jsonl", "text"], help="jsonl or plaintext (text)"
+        "--start-idx", default=0, type=int, help="can be used to specify a subset of input file to decode (start index)"
+    )
+    parser.add_argument(
+        "--end-idx", default=-1, type=int, help="can be used to specify a subset of input file to decode (last index)"
+    )
+    parser.add_argument(
+        "--datastyle", default="text", type=str, choices=["jsonl", "single-jsonl", "text"], help="jsonl or plaintext (text)"
     )
     parser.add_argument(
         "--jsonl-primary-key", default="context", type=str, help="primary key to access text in the jsonl file"
@@ -39,7 +45,8 @@ def get_parser():
         "--tokenizer", default=None, type=str, help="path to the trained lm"
     )
     parser.add_argument("--target-tokenize-different", action="store_true", help="use target specific tokenizer")
-    parser.add_argument("--use_context", action="store_true", help="use context to compute loss (for some of them atleast)")
+    parser.add_argument("--use_context", type=str, default="false", help="use context to compute loss (for some of them atleast)")
+    parser.add_argument("--random-example", type=str, default="true", help="use context to compute loss (for some of them atleast)")
     parser.add_argument("--final-bias", action="store_true", help="use target specific tokenizer")
     parser.add_argument("--show-all-outputs", action="store_true", help="show all valid outputs")
     parser.add_argument("--debug-gradients", default="false", choices=["true", "false"], help="")
@@ -107,9 +114,9 @@ def get_parser():
     )
     parser.add_argument(
         "--topic-target",
-        default="science",
+        default="none",
         type=str,
-        choices=['computers', 'legal', 'military', 'politics', 'religion', 'science', 'space', 'pizza'],
+        choices=['computers', 'legal', 'military', 'politics', 'religion', 'science', 'space', 'pizza', 'none'],
         help="different LR patterns for different indices, default is constant for all. It gets updated as the training progresses too."
     )
     parser.add_argument(

@@ -102,7 +102,7 @@ def main(args):
     else:
         keywords = args.keywords.split(":")
         if len(keywords) == 1:
-            keywords = [keywords[0] for _ in losses] #when keyword isn't used but topic is passed
+            keywords = [f"_topic_:{args.keywords[0]}" for _ in losses] #when keyword isn't used but topic is passed
     
     if "allsat" in args.selection_criterion: 
         # with this flag, the output which minimized the primary objective while satisfying all objectives is selected. In case all constraints are not satisfied (e.g when constraints are competing or optimization fails), this will predict the default output (Using an autoregressive decoding setup: beam search in this case)
@@ -219,18 +219,21 @@ def main(args):
     source_dataset = None
     target_dataset = None
     additional_dataset = None
+    print("yass queen", args.use_context)
+    args.use_context = args.use_context == "true"
+    print(args.use_context)
     if args.data is not None:
         data_paths = args.data.split(":")
         if len(data_paths) == 1:
             source_data = data_paths[0]
             target_data = data_paths[0] #not used
             context_data = data_paths[0] # not used
-            args.use_context = False
+            # args.use_context = False
         elif len(data_paths) == 2:
             source_data = data_paths[0]
             target_data = data_paths[1] # useful for debugging
             context_data = data_paths[1] #not used here
-            args.use_context = False
+            # args.use_context = False
         else:
             source_data = data_paths[0]
             target_data = data_paths[1] # useful for debugging
@@ -245,6 +248,8 @@ def main(args):
         additional_data = args.additional_data
     else:
         source_dataset = sys.stdin
+        start_idx = 0
+        end_idx = 1000000 # a very high number
     
     if source_dataset is None:
         logger.info("Loading the dataset ...")
@@ -272,6 +277,16 @@ def main(args):
                 context_dataset = [json.loads(l)[args.jsonl_primary_key] for l in open(context_data)]
                 if args.jsonl_secondary_key is not None and args.jsonl_secondary_key != "none":
                     context_dataset = [x[args.jsonl_secondary_key] for x in context_dataset]
+        elif args.datastyle == "single-jsonl": #one jsonl file has all the information
+            source_dataset = [json.loads(l)[args.jsonl_primary_key] for l in open(source_data)]
+            target_dataset = [json.loads(l)[args.jsonl_secondary_key] for l in open(target_data)]
+            additional_dataset = [json.loads(l)[args.jsonl_secondary_key] for l in open(additional_data)]
+            
+            context_dataset = [None] * len(source_dataset)
+            if args.use_context:
+                context_dataset = [[json.loads(l)[args.jsonl_secondary_key]] for l in open(context_data)] #meaningful
+        start_idx = args.start_idx
+        end_idx = (len(source_dataset) + args.end_idx) % len(source_dataset) # also works with negative end_idx
             
         logger.info("Data loaded")
 
@@ -298,19 +313,24 @@ def main(args):
 
     # for source_text, target_text, additional_text in zip(source_dataset, target_dataset, additional_dataset):
     example_p = 1.0
+    args.random_example = args.random_example == "true"
     if args.num_examples > 0 and target_dataset is not None:
         example_p = args.num_examples*1.0/len(source_dataset)
-    print(example_p)
-
+    print(example_p, args.random_example)
+    print(start_idx, end_idx)
     for text_id, source_text in enumerate(source_dataset):
+        
+        if text_id < start_idx or text_id > end_idx:
+            continue
 
         if args.num_examples > 0 and c > 0 and c == args.num_examples: #stop after processing num_examples if it is set 
             print(f"done {c}")
             break
         
-        do_this_example = np.random.rand() <= example_p
-        if not do_this_example:
-            continue
+        if args.random_example:
+            do_this_example = np.random.rand() <= example_p
+            if not do_this_example:
+                continue
 
         c += 1
 
@@ -319,7 +339,10 @@ def main(args):
             target_text = target_dataset[text_id]
             additional_text = additional_dataset[text_id]
             context_texts = context_dataset[text_id]
+            # print(context_texts)
+            # input()
         else:
+            args.jsonl_tokenized = False
             items = source_text.split("::")
             source_text = items[0].rstrip()
             target_text = items[1].rstrip()
@@ -350,10 +373,10 @@ def main(args):
                 
         if args.keywords == "_roc_":
             keywords = ["none"] + additional_text.split(", ")
-            input(keywords)
+            # input(keywords)
         elif args.keywords == "_commongen_":
             keywords = ["none"] + json.loads(additional_text)['concept_set'].split("#")
-            input(keywords)
+            # input(keywords)
 
         
         early_skip="n"
@@ -438,8 +461,10 @@ def main(args):
             additional_batch = torch.cat(additional_batch, dim=0).to(device)
             for_predicted_source_batch = torch.cat(for_predicted_source_batch, dim=0).to(device)  
             
+            # print("what", args.use_context)
             if args.use_context:
                 context_batch = torch.cat(context_batch, dim=0).to(device)
+                print(context_batch)
 
             broken_skip = False
             for sample_idx in range(args.num_samples):
@@ -473,6 +498,7 @@ def main(args):
                     total_predicted_loss = 0.0
                     predicted_allsat=True
                     predictedlosses = []
+                    # print("what2", args.use_context)
                     for lossid in range(len(losses)):
                         lossname = losses[lossid]
                         predicted_loss, predicted_lo =\
@@ -716,6 +742,7 @@ def main(args):
                             best_allsat = [False] * batch_size
                             best_repeat_count = [0] * batch_size
                             best_losses = [[None] * batch_size for _ in range(len(losses))]
+                            best_step = -100
                             
                             best_pred_tokens = [None] * batch_size
                             best_prediction_set = [set() for _ in range(batch_size)]
@@ -764,6 +791,7 @@ def main(args):
                                         if len(pred_embeds) > 1:
                                             original_preds = pred_embeds[1]
 
+                                        # print("what", args.use_context)
                                         for lossid, lossname in enumerate(losses):
                                             lossvalue, logging_output =\
                                                 lossfns[lossid].compute_loss(
@@ -839,6 +867,7 @@ def main(args):
                                                 damp = args.dampness * constraint_value
                                                 # lambda_.set_active(sid-1, constraint_value)
                                                 mask = lambda_.get_mask(sid-1, damp)
+                                                # mask = 1.0
 
                                                 closs_for_theta = lambda_.get_loss(sid - 1, damp * mask, (cur_epsilon - losses_for_backward[sid]))
                                                 total_loss = total_loss - closs_for_theta
@@ -868,22 +897,26 @@ def main(args):
                                         optimizer.step(scaler=scaler)
                                     
                                     update_lr_condition = "none"
+                                    if args.linear_scale != "true" and  len(losses) > 1:
+                                        sats = torch.Tensor(constraint_values).ge(0.).to(device)
+                                        update_lambda_condition = (step % args.lambda_update == 0)
+                                        lambda_mask = float(update_lambda_condition) * torch.ones_like(sats)
+                                        
+                                        lambda_mask += (1-sats.float()) * (lambda_.is_zero())
+                                        # if not sats.all() and (lambda_.any_zero()):
+                                        #     print("funky new update")
+                                        #     update_lambda_condition = True
+                                        #     lambda_mask = torch.ones_like(sats)
+                                        lambda_mask += sats.float()
 
-                                    sats = torch.Tensor(constraint_values).ge(0.).to(device)
-                                    update_lambda_condition = (step % args.lambda_update == 0)
-                                    lambda_mask = float(update_lambda_condition) * torch.ones_like(sats)
+                                        # if step > args.lambda_update:
                                     
-                                    lambda_mask += (1-sats.float()) * (lambda_.is_zero())
-                                    # if not sats.all() and (lambda_.any_zero()):
-                                    #     print("funky new update")
-                                    #     update_lambda_condition = True
-                                    #     lambda_mask = torch.ones_like(sats)
-
-                                    # if step > args.lambda_update:
                                     total_batchlossitem = total_batchloss.item()
+                                    # if dynamic_lambda_update_prev_loss is not None:
+                                        # print(abs(total_batchlossitem - dynamic_lambda_update_prev_loss))
                                     if dynamic_lambda_update_prev_loss is not None and abs(total_batchlossitem - dynamic_lambda_update_prev_loss) <= 1e-6:
                                         repeat_counts[0] += 1
-                                        if args.dynamic_lambda_update:
+                                        if args.linear_scale != "true" and  len(losses) > 1 and args.dynamic_lambda_update:
                                             lambda_mask = (1 - sats.float())
                                             # print("what now", total_batchlossitem, dynamic_lambda_update_prev_loss, constraint_values, sats.float())
                                             # if sats.all(): #constraints are satisfied
@@ -892,21 +925,24 @@ def main(args):
                                             # else:
                                             #     update_lambda_condition = True
 
-                                        if args.dynamic_lr_update: # and best_allsat[0] is not None and best_allsat[0]:
+                                        if args.dynamic_lr_update and best_allsat[0] is not None and best_allsat[0]:
                                             update_lr_condition = "increase"
                                     else:
                                         repeat_counts[0] = 1
 
+                                    
                                     dynamic_lambda_update_prev_loss = total_batchlossitem
 
                                     if update_lr_condition == "increase":
                                         cur_lr = optimizer._optimizer.update_lr(min(cur_lr + args.lr_update_size, args.max_lr))
 
                                     if args.linear_scale != "true" and len(losses) > 1:
-                                        # print(lambda_mask)
+                                        # print(lambda_mask, repeat_counts)
                                         optimizer_lambda._optimizer.set_mask(lambda_mask.clamp(max=1.0, min=0.0))
                                         optimizer_lambda.step()
                                         lambda_.make_positive()
+                                    
+                                    
 
                                         # total_batchloss_for_lambda = total_loss_for_lambda.sum()
                                         # optimizer_lambda.backward(total_batchloss_for_lambda, retain_graph=True, scaler=scaler)
@@ -960,10 +996,12 @@ def main(args):
                                                 (best_allsat[b] and allsat and best_loss[b] > cur_loss)
 
                                         # step>20 and 
+
                                         if modify_condition:
                                             if args.dynamic_lr_update:
                                                 print("resetting the learning rate, a constraint has been satisfied")
                                                 cur_lr = optimizer._optimizer.update_lr(args.lr)
+                                                # lambda_.reset(torch.Tensor(constraint_values).le(0.).to(device))
                                             if args.selection_criterion != "last":
                                                 print(f"modify condition @{step}", time.time()-starttime, end="\n")
                                             best_loss[b] = cur_loss
@@ -976,6 +1014,9 @@ def main(args):
                                             best_index[b] = step
                                             # best_pred_probs[b] = (pred_probs[b].cpu(), logging_outputs[0]["lm_logprobs"][b])
                                             best_constrained = constrained
+                                            best_step = step
+                                        # elif best_step < step - 1 and args.dynamic_lr_update:
+                                        #     print("resetting the learning rate, the constraint just got unsatisfied")
                                             
                                     if not args.time and step > 0 and step % args.log_interval == 0:
                                         if len(losses) > 1:
@@ -1064,7 +1105,7 @@ def main(args):
                                     lossvalue = 0.0
                                     for lossid in range(len(betas)):
                                         lossvalue += betas[lossid] * predictedlosslists[-1][lossid][b] # VERIFICATION NEEDED
-                                    print("best prediction is from beam search, all constraints were not satisfied")
+                                    print(f"best prediction is from beam search, all constraints were not satisfied, allsat={lengthwise_best_prediction[b][2]}")
                                 else:
                                     prediction_ids = ", ".join([str(x) for x in target_prefix[b].tolist()])
                                     prediction_ids +=   f'[{", ".join([str(x) for x in item.tolist()])}]'
@@ -1084,15 +1125,16 @@ def main(args):
                                         lengthwise_best_prediction[b] is None or\
                                         (args.selection_criterion == "weighted_sum" and lengthwise_best_prediction[b][1] > lossvalue)
                                     
-                                    if not modify_condition and args.selection_criterion == "primary_allsat":
+                                    if not modify_condition and args.selection_criterion in ["primary_allsat", "mrr_allsat"]:
                                         modify_condition =\
                                             (not lengthwise_best_prediction[b][2] and best_allsat[b]) or\
                                             (lengthwise_best_prediction[b][2] and best_allsat[b] and lengthwise_best_prediction[b][1] > lossvalue)
                                     
-                                    elif not modify_condition and args.selection_criterion == "mrr_allsat":
-                                        modify_condition =\
-                                            (not lengthwise_best_prediction[b][2] and best_allsat[b] and best_repeat_count[b] >= 2) or\
-                                            (lengthwise_best_prediction[b][2] and lengthwise_best_prediction[b][4] >= 2 and lengthwise_best_prediction[b][1] > lossvalue)
+                                    # elif not modify_condition and args.selection_criterion == "mrr_allsat":
+                                    #     modify_condition =\
+                                    #         (not lengthwise_best_prediction[b][2] and best_allsat[b] and best_repeat_count[b] >= 2) or\
+                                    #         (lengthwise_best_prediction[b][2] and lengthwise_best_prediction[b][1] > lossvalue)
+                                            # (lengthwise_best_prediction[b][2] and lengthwise_best_prediction[b][4] >= 2 and lengthwise_best_prediction[b][1] > lossvalue)
                                         
                                     
                                     if modify_condition:

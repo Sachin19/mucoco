@@ -29,4 +29,7 @@ class Lambda(torch.nn.Module): #multipliers for the constraints
     
     def make_positive(self):
         posmask = self.lambda_.detach() > 0.
-        self.lambda_.data.copy_(self.lambda_.data * posmask.float())
+        self.lambda_.data.clamp_(min=0) #copy_(self.lambda_.data * posmask.float())
+    
+    def reset(self, mask):
+        self.lambda_.data.copy_(self.lambda_.data * mask)

@@ -1477,6 +1477,9 @@ class EmbedGD(torch.optim.Optimizer):
     
     def get_current_lr(self):
         return self.base_lr
+    
+    def set_begin_std(self, temp):
+        self.begintemp = temp
 
     def update_lr(self, lr):
         self.base_lr = lr
@@ -1531,7 +1534,7 @@ class EmbedGD(torch.optim.Optimizer):
                 noise = 0.0
                 if self.noise_variance >= 1e-6:
                     noise = torch.empty_like(gradient).normal_(mean=0,std=1)  #TODO schedule
-                    noise_std = max(self.finaltemp, self.begintemp * pow(self.r, timestep))
+                    noise_std = min(self.begintemp, max(self.finaltemp, self.begintemp * pow(self.r, timestep)))
                     noise = torch.sqrt(2*lrs) * noise * noise_std
                 
                 # s = s + torch.square(gradient.detach())
