@@ -28,16 +28,10 @@ class KeyWordClassification(BaseLoss):
             vocabsize = self.model.get_input_embeddings().num_embeddings
             for filename in os.listdir(args.topic_word_lists):
                 topicname = filename.split("/")[-1].split(".")[0]
-                # wordlist = torch.zeros((vocabsize,)).to(self.device)
-                allwords = []
+                self.topic2words[topicname] = []
                 for word in open(args.topic_word_lists+"/"+filename):
-                    wordtok = self.tokenizer.encode(" "+word.strip())
-                    allwords += wordtok
-                    # for tokid in wordtok:
-                        # wordlist[tokid] = 1           
-                allwords = list(set(allwords))
-                self.topic2words[topicname] = torch.LongTensor(allwords).to(self.device) #wordlist#/wordlist.sum(dim=-1)
-                print(topicname, len(allwords))# wordlist.sum(dim=-1))
+                    word_tokenized = self.tokenizer.encode(" "+word)
+                    self.topic2words[topicname].append(torch.LongTensor(word_tokenized).to(self.device))
         
         self.epsilon_additive = 0#-np.log(self.topic2words[self.topic_target].sum().item())
         print(topicname, self.epsilon_additive)
@@ -56,59 +50,34 @@ class KeyWordClassification(BaseLoss):
         else:
             prefix = batch
 
+        # print(topic, topk)
         pred_tokens, pred_embeds, pred_probs = preds
         batch_size = pred_embeds.size(0)
         embed_lut = self.model.get_input_embeddings()
 
-        # predlen = pred_embeds.size(1)
-        # if step == 0:
-        #     block_size = 10
-        #     pyramid = [1 for i in range(min(block_size, predlen))] + [0 for i in range(max(0, predlen-block_size))]
-        #     # reverse_pyramid = [1 for i in range(min(block_size, predlen))] + [0 for i in range(max(0, predlen-block_size))]
-        #     # reverse_pyramid.reverse()
-        #     reverse_pyramid = [1 for i in range(predlen)]
-        #     self.masks = torch.Tensor(reverse_pyramid + pyramid).unsqueeze(0).to(self.device)
+        keyword_logits = -torch.square(torch.cdist(pred_embeds, embed_lut.weight.unsqueeze(0)))
+        keyword_probs_all = F.softmax(keyword_logits, dim=-1)
+        output_length = keyword_probs_all.size(1)
+        losses = []
+        for keyword_tokenized in self.topic2words[topic]:
+            keyword_probs = keyword_probs_all.index_select(dim=-1, index=keyword_tokenized)
+            ngram_length = keyword_tokenized.size(0)
+            ngram_probs = [keyword_probs[:, :output_length-ngram_length+1, 0]] #first token of the ngram
+            for i in range(1, ngram_length):
+                ngram_probs.append(keyword_probs[:, i:output_length-ngram_length + i + 1, i])
 
-        #     coeff_steps = 200
-        #     self.freq = max(1, coeff_steps // predlen)
-        
-        # idx = max(0, predlen - 1 - step // self.freq)
-        # masks = self.masks[:, idx:idx + predlen]
+            ngram_probs = torch.stack(ngram_probs, dim=2)
+            ngram_nll = -torch.log(ngram_probs).mean(dim=-1)
+            
+            tau=0.1
+            ngram_nll_q = F.gumbel_softmax(-ngram_nll/tau)
+            loss = ngram_nll_q * ngram_nll
+            loss = loss.sum(dim=-1)
 
-        # print(idx, masks)
-        # input_embeds = torch.cat([embed_lut(source), embed_lut(prefix), pred_embeds], dim=1)
-        # hidden_states = self.model(inputs_embeds=input_embeds, step=step, go_inside="transformer")[0]
+            losses.append(loss)
         
-        topicwords = self.topic2words[topic]
-        # topic_logits = pred_embeds.matmul(embed_lut.weight.t())
-        # topic_logits = torch.square(pred_embeds.unsqueeze(2) - embed_lut.weight.unsqueeze(0).unsqueeze(1)).sum(dim=-1)
-        logits = -torch.square(torch.cdist(pred_embeds, embed_lut.weight.unsqueeze(0), p=2))
-        topic_logits = logits.index_select(dim=-1, index=topicwords)
-        # topic_probs = (F.softmax(topic_logits, dim=-1) * topicwords)
-        topic_probs = F.softmax(topic_logits, dim=-1)
-        # print(topic_probs.size())
-        
-        topic_probs = topic_probs.sum(dim=-1)# * masks
-        # print(topic_probs)
-        # print(topic_probs.topk(dim=-1, k=self.topk))
-        # loss = -torch.log(topic_probs.topk(dim=-1, k=self.topk)[0]) 
-        # loss = -torch.log(topic_probs)
-        # loss = loss.mean(dim=-1)
-
-        topic_nll = -torch.log(topic_probs)
-        # ngram_logprobs = torch.log(ngram_probs).mean(dim=-1)
-        
-        # g = (ngram_logprobs).topk(dim=-1, k=self.topk)
-        # loss = -g[0].mean(dim=-1)
-        # print(loss.size())
-        # tau = 0.00001
-        tau=1.0
-        topic_nll_q = F.gumbel_softmax(-topic_nll/tau)
-        
-        # print(ngram_nll_q)
-        loss = topic_nll_q * topic_nll
-        loss = loss.sum(dim=-1)
-        
+        # print((-torch.stack(losses, dim=0)).topk(k=topk, dim=0))
+        loss = -(-torch.stack(losses, dim=0)).topk(k=topk, dim=0)[0].mean(dim=0)
         logging_output = {
             "loss": loss.data.cpu(),
         }
@@ -124,29 +93,38 @@ class KeyWordClassification(BaseLoss):
         batch_size=target.size(0)
     
         topic = self.topic_target
+        topk = self.topk
         #input_tokens = torch.cat([bos, prefix, pred_tokens, eos], dim=1)
         embed_lut = self.model.get_input_embeddings()
+        pred_embeds = embed_lut(target)
         
-        # print(self.topic2words.keys())
-        topicwords = self.topic2words[topic]
-        return torch.Tensor([0.])
         # print(topic)
+        keyword_logits = -torch.square(torch.cdist(pred_embeds, embed_lut.weight.unsqueeze(0)))
+        keyword_probs_all = F.softmax(keyword_logits, dim=-1)
+        output_length = keyword_probs_all.size(1)
+        losses = []
+        for keyword_tokenized in self.topic2words[topic]:
+            keyword_probs = keyword_probs_all.index_select(dim=-1, index=keyword_tokenized)
+            ngram_length = keyword_tokenized.size(0)
+            ngram_probs = [keyword_probs[:, :output_length-ngram_length+1, 0]] #first token of the ngram
+            for i in range(1, ngram_length):
+                ngram_probs.append(keyword_probs[:, i:output_length-ngram_length + i + 1, i])
 
-        # topic_logits = embed_lut(target).matmul(embed_lut.weight.t())
-        # # print(topic_logits.size())
-        # topic_probs = (F.softmax(topic_logits, dim=-1) * topicwords).sum(dim=-1)
+            ngram_probs = torch.stack(ngram_probs, dim=2)
+            ngram_nll = -torch.log(ngram_probs).mean(dim=-1)
+            
+            tau=0.1
+            ngram_nll_q = F.gumbel_softmax(-ngram_nll/tau)
+            loss = ngram_nll_q * ngram_nll
+            loss = loss.sum(dim=-1)
 
-        # # print(topic_probs)
-        # print(topic_probs)
-        # print(topic_probs.topk(dim=-1, k=self.topk))
-        # loss = -torch.log(topic_probs.topk(dim=-1, k=self.topk)[0]) 
-        # loss = loss.mean(dim=-1)
-        # loss = -torch.log(topic_probs.max(dim=-1)[0]) #max pooling, try others
-        # loss = -torch.log(topic_probs).sum(dim=-1) #max pooling, try others
-        # print(loss)
-        # loss = loss.sum()
-        # print(loss)
-    
+            losses.append(loss)
+        
+        # print(losses)
+        loss = -(-torch.stack(losses, dim=0)).topk(k=topk, dim=0)[0].mean(dim=0)
+        print(loss)
+        # input()
+
         logging_output = {
             "loss": loss.data.cpu(),
         }
