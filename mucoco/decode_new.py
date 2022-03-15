@@ -368,6 +368,9 @@ def main(args):
         if args.keywords == "_roc_":
             keywords = ["none"] + additional_text.split(", ")
             # input(keywords)
+        if args.keywords == "_rocunique_":
+            keywords = ["none"] + additional_text.split(", ") + + ['none']
+            # input(keywords)
         elif args.keywords == "_commongen_":
             print(additional_text)
             keywords = ["none"] + json.loads(additional_text)['concept_set'].split("#")
@@ -860,6 +863,7 @@ def main(args):
 
                                             constraint_values = []
                                             for sid in range(1, len(losses_for_backward)): #the secondary losses or constraints
+                                                # print(sid-1, epsilons, min_epsilons, epsilon_warmup_steps, epsilon_cooldown_steps)
                                                 cur_epsilon = get_epsilon(step, epsilons[sid-1], min_epsilons[sid-1], epsilon_warmup_steps[sid-1], epsilon_cooldown_steps[sid-1], epsilon_decay_functions[sid-1])
                                                 # print(cur_epsilon)
                                                 constraint_value = (cur_epsilon - losses_for_backward[sid]).detach()
@@ -909,7 +913,7 @@ def main(args):
                                         # lambda_mask += sats.float()
 
                                         # if args.linear_scale != "true" and  len(losses) > 1 and args.dynamic_lambda_update:
-                                            # lambda_mask = (1 - sats.float())
+                                        #     lambda_mask += (1 - sats.float())
                                         # if step > args.lambda_update:
                                     
                                     # total_batchlossitem = total_batchloss.item()
@@ -940,8 +944,12 @@ def main(args):
 
                                     if args.linear_scale != "true" and len(losses) > 1:
                                         # print(lambda_mask, repeat_counts)
+                                        # print([p.grad for p in lambda_.parameters()])
+                                        # print(step, lambda_().tolist(), lambda_mask, )
                                         optimizer_lambda._optimizer.set_mask(lambda_mask.clamp(max=1.0, min=0.0))
                                         optimizer_lambda.step()
+                                        # print(step, lambda_().tolist())
+                                        # input()
                                         lambda_.make_positive()
                                     
                                     
@@ -1113,7 +1121,7 @@ def main(args):
                                     prediction_ids +=   f'[{", ".join([str(x) for x in item.tolist()])}]'
                                     prediction_indices = target_prefix[b].tolist() + item.tolist()
                                     
-                                    targets = clean_output(item.tolist(), primary_tokenizer.eos_token_id, allow_first_eos=losses[0] == "bart")
+                                    targets = clean_output(item.tolist(), primary_tokenizer.eos_token_id, allow_first_eos=losses[0] == "bart")#, prompt=source_batch[b].unsqueeze(0), sentence_complete=True, lossfn=lossfns[0])
                                     if args.target_tokenize_different:
                                         with primary_tokenizer.as_target_tokenizer():
                                             prediction = primary_tokenizer.decode(target_prefix[b].tolist() + targets)
@@ -1321,11 +1329,22 @@ def main(args):
     print("average numbers of steps to converge =", np.mean(all_stepcounts))
     print("average time = ", avg_time/c)
 
-def sentence_completion():
-    pass
+def prune(sentence):
+    pass 
 
-def clean_output(tokens, eos_token_id, return_tensors=False, allow_first_eos=False, skip_special_tokens=[], sentence_complete=False):
+def sentence_completion(prompt, tokens, lossfn):
+    lossfn.args.max_output_length = lossfn.args.max_output_length + 10
+    print(tokens)
+    new_tokens = lossfn.generate(torch.cat([prompt, torch.LongTensor([tokens]).to(lossfn.device)], dim=1))
+    print(new_tokens)
+    lossfn.args.max_output_length = lossfn.args.max_output_length - 10
+    return tokens + new_tokens[0].tolist()
+    # return tokens
+
+def clean_output(tokens, eos_token_id, return_tensors=False, allow_first_eos=False, skip_special_tokens=[], prompt=None, sentence_complete=False, lossfn=None):
     # print(tokens)
+    if sentence_complete:
+        tokens = sentence_completion(prompt, tokens, lossfn)
     new_tokens = []
     for i, tok in enumerate(tokens):
         if tok == eos_token_id and (not allow_first_eos or i > 0):
