@@ -31,4 +31,4 @@ To add more losses/constraints, follow examples from 'mucoco/losses/'
 
 ## License
 
-The source code licensed under the MIT license, which you can find in the LICENSE.md file
+The source code is licensed under the MIT license, which you can find in the LICENSE.md file
