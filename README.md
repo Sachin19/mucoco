@@ -28,3 +28,7 @@ This code currently supports the following losses:
 * Conditional generation losses (MarianMT, GPT2)
 
 To add more losses/constraints, follow examples from 'mucoco/losses/'
+
+## License
+
+The source code licensed under the MIT license, which you can find in the LICENSE.md file
