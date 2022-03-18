@@ -26,8 +26,14 @@ BARTFORMALITYMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/gpt2
 # SENTIMENTMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/gpt2-medium-sst-2-with-gpt2-large-embeds/checkpoint_best
 # SENTIMENTMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/gpt2-medium-sentiment-binary-classifier-with-gp2-large-embeds/results/checkpoint-12000/
 # SENTIMENTMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/gpt2-sentiment-5-classifier/checkpoint_best/
-SENTIMENTMODEL1=/projects/tir5/users/sachink/embed-style-transfer/models/roberta-base-sst-2-with-gpt2-large-embeds/checkpoint_best
-SENTIMENTMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/roberta-base-sst-2-with-gpt2-large-embeds${23}/checkpoint_best
+# SENTIMENTMODEL1=/projects/tir5/users/sachink/embed-style-transfer/models/roberta-base-sst-2-with-gpt2-large-embeds/checkpoint_best
+# SENTIMENTMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/roberta-base-sst-2-with-gpt2-large-embeds${23}/checkpoint_best
+# SENTIMENTMODEL4=/projects/tir5/users/sachink/embed-style-transfer/models/gpt2-medium-jmamou-sst-2-with-gpt2-large-embeds/checkpoint_best
+# SENTIMENTMODEL3=/projects/tir5/users/sachink/embed-style-transfer/models/roberta-large-sst-2-with-gpt2-large-embeds/checkpoint_best
+# SENTIMENTMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/roberta-base-textattack-sst-2-with-gpt2-large-embeds/checkpoint_best
+SENTIMENTMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/roberta-base-textattack-very-sst-2-with-gpt2-large-embeds/checkpoint_best/
+SENTIMENTMODEL3=/projects/tir5/users/sachink/embed-style-transfer/code/models/roberta-base-textattack-very-yelp-with-gpt2-large-embeds/checkpoint_best
+SENTIMENTMODEL2=/projects/tir5/users/sachink/embed-style-transfer/code/models/roberta-base-victorsanh-yelp-with-gpt2-large-embeds/checkpoint_best
 # SENTIMENTMODEL2=/projects/tir5/users/sachink/embed-style-transfer/models/roberta-base-sst-2-with-gpt2-large-embeds/checkpoint_best
 SHAKESPEAREMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/gpt2-Shakespeare-frozen-embeds/checkpoint_best/
 ENGLISHESMODEL=/projects/tir5/users/sachink/embed-style-transfer/models/gpt2-englishes-frozen-embeds/results/checkpoint-1000
@@ -47,7 +53,7 @@ DATASTYLE="text"
 ADDITIONALDATAFILE="none"
 JSON_PKEY="none"
 JSON_SKEY="none"
-TARGETTOPIC="legal"
+TARGETTOPIC="none"
 KEYWORDS="the"
 KEYWORDTOPK=1
 JSONTOK=false
@@ -76,6 +82,29 @@ always_mucoco=${26}
 only_mucoco=${27}
 MAXLR=${28}
 LRUPDATESIZE=${29}
+RESTARTS=${30}
+RANDOMEXAMPLE=${31}
+STARTIDX=${32}
+ENDIDX=${33}
+USECONTEXT="false"
+if [[ -z "$RANDOMEXAMPLE" ]]
+then
+    RANDOMEXAMPLE="true"
+    # p > 0.5 default
+fi
+if [[ -z "$STARTIDX" ]]
+then
+    STARTIDX=0
+fi
+if [[ -z "$ENDIDX" ]]
+then
+    ENDIDX=-1
+fi
+if [[ -z "$RESTARTS" ]]
+then
+    RESTARTS=0
+    # p > 0.5 default
+fi
 if [[ -z "$MAXLR" ]]
 then
     MAXLR=0.45
@@ -192,26 +221,26 @@ then
     JSON_SKEY="none"
     JSONTOK=true
     NUM_SAMPLES=1 #CHECK
-    OUTPUTLEN=200
-    MAXLEN=200
+    OUTPUTLEN=100
+    MAXLEN=100
     OUTFILE=$OUTDIR/outputs.jsonl
     model=$PRIMARYMODEL:$PRIMARYMODEL
     tokenizer=$PRIMARYMODEL:$PRIMARYMODEL
     model_types=AutoModelForCausalLM:AutoModelForCausalLM
     betas=0.8:0.2
-    noise_variance=0.0
+    noise_variance=1.0
     embedgd_do_sample="false"
-    loss=gpt2:unlikelihood
+    loss=gpt2:unique
     lossabbr="logpyx:unlikelihood"
-    linear_scale="true"
-    selection_criterion="primary_allsat"
-    epsilons=-6
+    linear_scale="false"
+    selection_criterion="mrr_allsat"
+    epsilons=$CLASSLOGPROB
     label_id=none
-    min_epsilons=-6.5
+    min_epsilons=$CLASSLOGPROB
     epsilon_warmup_steps=0
-    epsilon_cooldown_steps=100
+    epsilon_cooldown_steps=1
     epsilon_decay_functions=linear
-    LAMBDALR=2.0
+    LAMBDALR=1.0
 elif [[ "$option" == "debug" ]]  ## no prompt just generate directly with uniqueness constraint to reduce repetitions
 then 
     echo "debugging gradient mode"
@@ -243,8 +272,8 @@ then
     JSON_SKEY="none"
     JSONTOK=true
     NUM_SAMPLES=1 #CHECK
-    OUTPUTLEN=200
-    MAXLEN=200
+    OUTPUTLEN=50
+    MAXLEN=50
     OUTFILE=$OUTDIR/outputs.jsonl
     model=$PRIMARYMODEL
     tokenizer=$PRIMARYMODEL
@@ -285,6 +314,56 @@ then
     epsilon_warmup_steps=none
     epsilon_cooldown_steps=none
     epsilon_decay_functions=none
+elif [[ "$option" == "positive-tiny" ]]
+then
+    echo "positive-tiny"
+    OPTIMSTEPS=250
+    DATASTYLE="text"
+    DATAFILE=$DATA_DIR/control-prompts/pplm-discrim-prompts/prompts.txt
+    NUM_SAMPLES=100  
+    OUTPUTLEN=20
+    MAXLEN=20
+    model=$PRIMARYMODEL:$SENTIMENTMODEL
+    tokenizer=$PRIMARYMODEL:$SENTIMENTMODEL
+    model_types=AutoModelForCausalLM:RobertaCustomForSequenceClassification
+    betas=0.8:0.2
+    loss=gpt2:classification
+    label_id=0:1
+    lossabbr="pyx:binary"
+    selection_criterion="mrr_allsat"
+    epsilons=$CLASSLOGPROB
+    min_epsilons=$CLASSLOGPROB
+    epsilon_warmup_steps=0
+    epsilon_cooldown_steps=1
+    epsilon_decay_functions=linear
+    LAMBDALR=1.0
+    noise_variance=1.0
+    embedgd_do_sample="false"
+elif [[ "$option" == "negative-tiny" ]]
+then
+    echo "negative-tiny"
+    OPTIMSTEPS=250
+    DATASTYLE="text"
+    DATAFILE=$DATA_DIR/control-prompts/pplm-discrim-prompts/prompts.txt
+    NUM_SAMPLES=100  
+    OUTPUTLEN=40
+    MAXLEN=40
+    model=$PRIMARYMODEL:$SENTIMENTMODEL
+    tokenizer=$PRIMARYMODEL:$SENTIMENTMODEL
+    model_types=AutoModelForCausalLM:RobertaCustomForSequenceClassification
+    betas=0.8:0.2
+    loss=gpt2:classification
+    label_id=0:0
+    lossabbr="pyx:binary"
+    selection_criterion="mrr_allsat"
+    epsilons=$CLASSLOGPROB
+    min_epsilons=$CLASSLOGPROB
+    epsilon_warmup_steps=0
+    epsilon_cooldown_steps=1
+    epsilon_decay_functions=linear
+    LAMBDALR=1.0
+    noise_variance=1.0
+    embedgd_do_sample="false"
 elif [[ "$option" == "positive-adv" ]]
 then
     echo "positive-adv"
@@ -356,7 +435,132 @@ then
     min_epsilons=$CLASSLOGPROB
     epsilon_warmup_steps=0
     epsilon_cooldown_steps=1
+    epsilon_decay_functions=step
+    LAMBDALR=1.0
+    noise_variance=1.0
+    embedgd_do_sample="false"
+elif [[ "$option" == "positive-neutral-pa" ]]
+then
+    echo "positive-neutral"
+    OPTIMSTEPS=250
+    DATASTYLE="jsonl"
+    DATAFILE=$DATA_DIR/control-prompts/sentiment_prompts-10k/neutral_prompts.jsonl
+    JSON_PKEY="prompt"
+    JSON_SKEY="text"
+    NUM_SAMPLES=25  
+    model=$PRIMARYMODEL:$SENTIMENTMODEL
+    tokenizer=$PRIMARYMODEL:$SENTIMENTMODEL
+    model_types=AutoModelForCausalLM:RobertaCustomForSequenceClassification
+    betas=0.8:0.2
+    loss=gpt2:classification
+    label_id=0:1
+    lossabbr="pyx:binary"
+    selection_criterion="primary_allsat"
+    epsilons=$CLASSLOGPROB
+    min_epsilons=$CLASSLOGPROB
+    epsilon_warmup_steps=0
+    epsilon_cooldown_steps=1
     epsilon_decay_functions=linear
+    LAMBDALR=1.0
+    noise_variance=1.0
+    embedgd_do_sample="false"
+elif [[ "$option" == "negative-neutral-pa" ]]
+then
+    echo "positive-neutral"
+    OPTIMSTEPS=250
+    DATASTYLE="jsonl"
+    DATAFILE=$DATA_DIR/control-prompts/sentiment_prompts-10k/neutral_prompts.jsonl
+    JSON_PKEY="prompt"
+    JSON_SKEY="text"
+    NUM_SAMPLES=25  
+    model=$PRIMARYMODEL:$SENTIMENTMODEL
+    tokenizer=$PRIMARYMODEL:$SENTIMENTMODEL
+    model_types=AutoModelForCausalLM:RobertaCustomForSequenceClassification
+    betas=0.8:0.2
+    loss=gpt2:classification
+    label_id=0:0
+    lossabbr="pyx:binary"
+    selection_criterion="primary_allsat"
+    epsilons=$CLASSLOGPROB
+    min_epsilons=$CLASSLOGPROB
+    epsilon_warmup_steps=0
+    epsilon_cooldown_steps=1
+    epsilon_decay_functions=linear
+    LAMBDALR=1.0
+    noise_variance=1.0
+    embedgd_do_sample="false"
+elif [[ "$option" == "positive-neutral-yelp" ]]
+then
+    echo "positive-neutral"
+    OPTIMSTEPS=250
+    DATASTYLE="jsonl"
+    DATAFILE=$DATA_DIR/control-prompts/sentiment_prompts-10k/neutral_prompts.jsonl
+    JSON_PKEY="prompt"
+    JSON_SKEY="text"
+    NUM_SAMPLES=25  
+    model=$PRIMARYMODEL:$SENTIMENTMODEL2
+    tokenizer=$PRIMARYMODEL:$SENTIMENTMODEL2
+    model_types=AutoModelForCausalLM:RobertaCustomForSequenceClassification
+    betas=0.8:0.2
+    loss=gpt2:classification
+    label_id=0:1
+    lossabbr="pyx:binary"
+    selection_criterion="mrr_allsat"
+    epsilons=$CLASSLOGPROB
+    min_epsilons=$CLASSLOGPROB
+    epsilon_warmup_steps=0
+    epsilon_cooldown_steps=1
+    epsilon_decay_functions=linear
+    LAMBDALR=1.0
+    noise_variance=1.0
+    embedgd_do_sample="false"
+elif [[ "$option" == "positive-neutral-yelp2" ]]
+then
+    echo "positive-neutral"
+    OPTIMSTEPS=250
+    DATASTYLE="jsonl"
+    DATAFILE=$DATA_DIR/control-prompts/sentiment_prompts-10k/neutral_prompts.jsonl
+    JSON_PKEY="prompt"
+    JSON_SKEY="text"
+    NUM_SAMPLES=25  
+    model=$PRIMARYMODEL:$SENTIMENTMODEL3
+    tokenizer=$PRIMARYMODEL:$SENTIMENTMODEL3
+    model_types=AutoModelForCausalLM:RobertaCustomForSequenceClassification
+    betas=0.8:0.2
+    loss=gpt2:classification
+    label_id=0:1
+    lossabbr="pyx:binary"
+    selection_criterion="mrr_allsat"
+    epsilons=$CLASSLOGPROB
+    min_epsilons=$CLASSLOGPROB
+    epsilon_warmup_steps=0
+    epsilon_cooldown_steps=1
+    epsilon_decay_functions=linear
+    LAMBDALR=1.0
+    noise_variance=1.0
+    embedgd_do_sample="false"
+elif [[ "$option" == "positive-neutral2" ]]
+then
+    echo "positive-neutral"
+    OPTIMSTEPS=250
+    DATASTYLE="jsonl"
+    DATAFILE=$DATA_DIR/control-prompts/sentiment_prompts-10k/neutral_prompts.jsonl
+    JSON_PKEY="prompt"
+    JSON_SKEY="text"
+    NUM_SAMPLES=25  
+    model=$PRIMARYMODEL:$SENTIMENTMODEL:$SENTIMENTMODEL2
+    tokenizer=$PRIMARYMODEL:$SENTIMENTMODEL:$SENTIMENTMODEL
+    model_types=AutoModelForCausalLM:RobertaCustomForSequenceClassification:RobertaCustomForSequenceClassification
+    betas=0.8:0.2:0.0
+    loss=gpt2:classification:classification
+    label_id=0:1:1
+    lossabbr="pyx:binary:binary2"
+    selection_criterion="mrr_allsat"
+    epsilons=$CLASSLOGPROB:$CLASSLOGPROB
+    min_epsilons=$CLASSLOGPROB:$CLASSLOGPROB
+    epsilon_warmup_steps=0:0
+    epsilon_cooldown_steps=1:1
+    epsilon_decay_functions=linear:linear
     LAMBDALR=1.0
     noise_variance=1.0
     embedgd_do_sample="false"
@@ -407,6 +611,32 @@ then
     epsilon_warmup_steps=0
     epsilon_cooldown_steps=1
     epsilon_decay_functions=linear
+    LAMBDALR=1.0
+    noise_variance=1.0
+    embedgd_do_sample="false"
+elif [[ "$option" == "negative-neutral2" ]]
+then
+    echo "negative-neutral2"
+    OPTIMSTEPS=200
+    DATASTYLE="jsonl"
+    DATAFILE=$DATA_DIR/control-prompts/sentiment_prompts-10k/neutral_prompts.jsonl
+    JSON_PKEY="prompt"
+    JSON_SKEY="text"
+    selection_criterion="mrr_allsat"
+    NUM_SAMPLES=25  
+    model=$PRIMARYMODEL:$SENTIMENTMODEL:$SENTIMENTMODEL2
+    tokenizer=$PRIMARYMODEL:$SENTIMENTMODEL:$SENTIMENTMODEL
+    model_types=AutoModelForCausalLM:RobertaCustomForSequenceClassification:RobertaCustomForSequenceClassification
+    betas=0.8:0.2:0.0
+    loss=gpt2:classification:classification
+    label_id=0:0:0
+    lossabbr="pyx:binary:binary2"
+    selection_criterion="mrr_allsat"
+    epsilons=$CLASSLOGPROB:$CLASSLOGPROB
+    min_epsilons=$CLASSLOGPROB:$CLASSLOGPROB
+    epsilon_warmup_steps=0:0
+    epsilon_cooldown_steps=1:1
+    epsilon_decay_functions=linear:linear
     LAMBDALR=1.0
     noise_variance=1.0
     embedgd_do_sample="false"
@@ -482,15 +712,23 @@ then
     LAMBDALR=1.0
     noise_variance=1.0
     embedgd_do_sample="false"
-elif [[ "$option" == "context" ]]
+elif [[ "$option" == "abductive" ]]
 then
-    echo "context"
+    echo "abductive"
     model=$PRIMARYMODEL:$PRIMARYMODEL
     tokenizer=$PRIMARYMODEL:$PRIMARYMODEL
     NUM_SAMPLES=1
+    OPTIMSTEPS=200
+    OUTPUTLEN=20
+    MAXLEN=20
+    DATASTYLE="single-jsonl"
+    JSON_PKEY="obs1"
+    JSON_SKEY="obs2"
+    USECONTEXT="true"
+    DATAFILE=$DATA_DIR/alpha-nlg/anlg/test-w-comet-preds.jsonl
     model_types=AutoModelForCausalLM:AutoModelForCausalLM
     betas=0.8:0.2
-    selection_criterion="primary_allsat"
+    selection_criterion="mrr_allsat"
     loss=gpt2:gpt2context
     label_id=0:0
     lossabbr="pyx:pzyx"
@@ -514,8 +752,8 @@ then
     linear_scale="false"
     WORDLIST=/projects/tir5/users/sachink/embed-style-transfer/related-work/naacl-2021-fudge-controlled-generation/topic_data/wordlists/
     NUM_SAMPLES=1
-    OUTPUTLEN=80
-    MAXLEN=80
+    OUTPUTLEN=40
+    MAXLEN=40
     KEYWORDTOPK=${12}
     model=$PRIMARYMODEL:$PRIMARYMODEL
     tokenizer=$PRIMARYMODEL:$PRIMARYMODEL
@@ -524,6 +762,7 @@ then
     loss=gpt2:keywordclassification
     label_id=0:0
     lossabbr="pyx:dist"
+    selection_criterion="mrr_allsat"
     epsilons=$CLASSLOGPROB
     min_epsilons=$CLASSLOGPROB
     epsilon_warmup_steps=0
@@ -638,7 +877,7 @@ then
     epsilon_warmup_steps=0:0:0:0
     epsilon_cooldown_steps=1:1:1:1
     epsilon_decay_functions=linear:linear:linear:linear
-    LAMBDALR=1.0
+    LAMBDALR=10.0
     selection_criterion="mrr_allsat"
     noise_variance=1.0
     embedgd_do_sample="false"
@@ -1056,7 +1295,7 @@ then
         --gold-loss-epsilons $gold_loss_epsilons\
         --kweight 5.0\
         --lr $lr\
-        --dampness 1.0\
+        --dampness 0.1\
         --epsilons $epsilons\
         --min_epsilons $min_epsilons\
         --epsilon_warmup_steps $epsilon_warmup_steps\
@@ -1069,7 +1308,10 @@ then
         --max-lr 0.45\
         --lr-update-size 0.01\
         --num-examples $NUMEXAMPLES\
+        --random-example $RANDOMEXAMPLE\
         --early-stop-steps 10\
+        --restarts $RESTARTS\
+        --use_context $USECONTEXT\
         --debug
 elif [[ "$debug" == "interactive" ]]
 then
@@ -1077,7 +1319,7 @@ then
     python -W ignore -u decode.py\
         --jsonl-primary-key $JSON_PKEY\
         --jsonl-secondary-key $JSON_SKEY\
-        --jsonl-tokenized false\
+        --jsonl-tokenized $JSONTOK\
         --model $model\
         --tokenizer $tokenizer\
         --model_types $model_types\
@@ -1096,7 +1338,7 @@ then
         --same-embeds\
         --always-mucoco $always_mucoco\
         --only-mucoco $only_mucoco\
-        --metric $7\
+        --metric l2\
         --max-grad-norm 0\
         --optim-steps $OPTIMSTEPS\
         --max-length $OUTPUTLEN\
@@ -1108,7 +1350,7 @@ then
         --embedgd-grad-distance $7\
         --embedgd-momentum $8\
         --scale_loss none\
-        --log-interval 1\
+        --log-interval 5\
         --decode-temperature 0.1\
         --label-id $label_id\
         --bos\
@@ -1124,9 +1366,8 @@ then
         --coeff-pattern $coeff_pattern\
         --embedgd-gumbel-noise-max 0.0\
         --embedgd-lr-pattern $9\
-        --embedgd-decay-method $9\
-        --embedgd-top-k ${11}\
         --embedgd-do-sample $embedgd_do_sample\
+        --embedgd-top-k ${11}\
         --embedgd-top-p ${embedgd_top_p}\
         --embedgd-begin-temperature $begin_temperature\
         --embedgd-final-temperature $final_temperature\
@@ -1136,7 +1377,7 @@ then
         --gold-loss-epsilons $gold_loss_epsilons\
         --kweight 5.0\
         --lr $lr\
-        --dampness 2.0\
+        --dampness 0.1\
         --epsilons $epsilons\
         --min_epsilons $min_epsilons\
         --epsilon_warmup_steps $epsilon_warmup_steps\
@@ -1146,9 +1387,13 @@ then
         --lambda-update $LAMBDA_UPDATES\
         --dynamic-lambda-update\
         --dynamic-lr-update\
-        --max-lr 1.0\
-        --lr-update-size 0.05\
-        --num-examples 20\
+        --max-lr 0.45\
+        --lr-update-size 0.01\
+        --num-examples $NUMEXAMPLES\
+        --random-example $RANDOMEXAMPLE\
+        --early-stop-steps 10\
+        --restarts $RESTARTS\
+        --use_context $USECONTEXT\
         --debug
 elif [[ "$debug" == "run_and_evaluate" ]]
 then
@@ -1229,7 +1474,11 @@ then
         --max-lr $MAXLR\
         --lr-update-size $LRUPDATESIZE\
         --num-examples $NUMEXAMPLES\
+        --random-example $RANDOMEXAMPLE\
+        --start-idx $STARTIDX\
+        --end-idx $ENDIDX\
         --early-stop-steps 10\
+        --restarts $RESTARTS\
         --outfile $OUTFILE\
         --output-style $OUTPUTSTYLE
     bash examples/prompt/evaluate.sh $option $OUTFILE $EVALFILE $DATAFILE 
