@@ -248,6 +248,8 @@ def main(args):
         additional_data = args.additional_data
     else:
         source_dataset = sys.stdin
+        start_idx = 0
+        end_idx = 1000000 # a very high number
     
     if source_dataset is None:
         logger.info("Loading the dataset ...")
@@ -283,7 +285,9 @@ def main(args):
             context_dataset = [None] * len(source_dataset)
             if args.use_context:
                 context_dataset = [[json.loads(l)[args.jsonl_secondary_key]] for l in open(context_data)] #meaningful
-            
+        start_idx = args.start_idx
+        end_idx = (len(source_dataset) + args.end_idx) % len(source_dataset) # also works with negative end_idx
+
         logger.info("Data loaded")
 
     source_batch, target_batch, additional_batch, for_predicted_source_batch, predicted_batch, context_batch = [], [], [], [], [], []
@@ -309,11 +313,15 @@ def main(args):
 
     # for source_text, target_text, additional_text in zip(source_dataset, target_dataset, additional_dataset):
     example_p = 1.0
+    args.random_example = args.random_example == "true"
     if args.num_examples > 0 and target_dataset is not None:
         example_p = args.num_examples*1.0/len(source_dataset)
-    print(example_p)
-
+    print(example_p, args.random_example)
+    print(start_idx, end_idx)
     for text_id, source_text in enumerate(source_dataset):
+        
+        if text_id < start_idx or text_id > end_idx:
+            continue
 
         if args.num_examples > 0 and c > 0 and c == args.num_examples: #stop after processing num_examples if it is set 
             print(f"done {c}")
@@ -527,7 +535,7 @@ def main(args):
                         # print("helllllllo",predicted_batch)
                         predicted_loss, predicted_lo =\
                             lossfns[lossid].compute_gold_loss(
-                                (source_batch, predicted_batch), 
+                                (source_batch, target_batch), 
                                 additional_batch=additional_batch, 
                                 context_batch=context_batch,
                                 use_context=args.use_context,
@@ -913,7 +921,7 @@ def main(args):
                                         # lambda_mask += sats.float()
 
                                         # if args.linear_scale != "true" and  len(losses) > 1 and args.dynamic_lambda_update:
-                                        #     lambda_mask += (1 - sats.float())
+                                            # lambda_mask += (1 - sats.float())
                                         # if step > args.lambda_update:
                                     
                                     # total_batchlossitem = total_batchloss.item()
@@ -1078,7 +1086,7 @@ def main(args):
                                         if early_stop_condition and same_loss_count >= args.early_stop_steps:
                                             print(f"Early stop at @{step} with a loss value of {cur_loss} and satisfied constraints")
                                             break
-                                        elif same_loss_count >= args.early_stop_steps + 2 * args.lambda_update:
+                                        elif same_loss_count >= args.early_stop_steps + 100:#2 * args.lambda_update:
                                             print(f"Early stop at @{step} with a loss value of {cur_loss} and unsatisfied constraints")
                                             break
                                             
