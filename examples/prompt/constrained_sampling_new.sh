@@ -1735,6 +1735,9 @@ then
         --max-lr $MAXLR\
         --lr-update-size $LRUPDATESIZE\
         --num-examples $NUMEXAMPLES\
+        --random-example $RANDOMEXAMPLE\
+        --start-idx $STARTIDX\
+        --end-idx $ENDIDX\
         --early-stop-steps 10\
         --restarts $RESTARTS\
         --outfile $OUTFILE\
