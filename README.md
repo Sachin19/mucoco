@@ -1,4 +1,6 @@
-This repository contains the code for the NeurIPS 2021 paper: [Controlled Text Generation as Continuous Optimization with Multiple Constraints](https://arxiv.org/abs/2108.01850)
+This repository contains the code for 
+* [Controlled Text Generation as Continuous Optimization with Multiple Constraints](https://arxiv.org/abs/2108.01850)
+* [Constrained Sampling from Language Models via Langevin Dynamics in Embedding Spaces](#)
 
 # Dependencies
 
@@ -9,22 +11,6 @@ This repository contains the code for the NeurIPS 2021 paper: [Controlled Text G
 
 # Quick Start
 
-The main file to run this decoding algorithm is `decode.py`. All models used in this code are based on huggingface transformers. 
+The main file to run this decoding algorithm is `decode_new.py`. All models used in this code are based on huggingface transformers. 
 
-## Machine Translation experiments
-
-see examples
-
-## Style Transfer experiments
-
-see examples
-
-# Adding new constraints
-
-This code currently supports the following losses:
-
-* Sentence Classification (Cross Entropy)
-* Semantic Similarity (Cosine Similarity, WMD between representations)
-* Conditional generation losses (MarianMT, GPT2)
-
-To add more losses/constraints, follow examples from 'mucoco/losses/'
+More instructions by the end of May 2022.
