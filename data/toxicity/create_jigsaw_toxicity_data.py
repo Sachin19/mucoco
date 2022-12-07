@@ -9,8 +9,8 @@ from collections import defaultdict
 import numpy as np
 import json 
 
-data_dir = '.'
-jigsaw_df = pd.read_csv(f'./all_data.csv')
+data_dir = 'data/toxicity/jigsaw-unintended-bias-in-toxicity-classification'
+jigsaw_df = pd.read_csv(f'{data_dir}/all_data.csv')
 attributes = ['toxicity', 'severe_toxicity', 'identity_attack', 'insult', 'threat', 'obscene', 'sexual_explicit']
 
 fos = defaultdict(dict)
