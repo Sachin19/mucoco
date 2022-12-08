@@ -7,7 +7,7 @@ EPSILON=none #the epsilon is not a hyperparameter but computed automatically in 
 
 # note: most arguments passed to constrained_sampling_mucola.sh are not used 
 
-# The code only works with a fixed number of constraints. The MT test set has 1, 2 or 3 keyphrase requirements. So I divide the test file into three parts and decode them separately. 
+# Number of constraints have to be prespeficied. The MT test set has 1, 2 or 3 keyphrase requirements. So I divide the test file into three parts and decode them separately. 
 # This code first decodes a string with beam-search (say of length L). If the constraints are satisfied, it stops. If not, it samples outputs of length L, L+2, L+4 .... L+20, and selects the one which satisfies constraints and has the lowest length averaged NLL. We do this because we do not know output length in advance.
 # The final output is also post processed to remove any trailing <pad> tokens.
 
