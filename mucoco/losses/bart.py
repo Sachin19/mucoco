@@ -152,6 +152,7 @@ class BARTLoss(BaseLoss):
         '''
         given a discrete target output, this will compute the loss wrt to it. Useful in debugging
         '''
+        print("ok2")
         source, target = batch
         batch_size = source.size(0)
         
@@ -187,7 +188,8 @@ class BARTLoss(BaseLoss):
                 "nsentences": batch_size,
             }
         elif losstype in ["l2", "cosine", "dot", "dotplusplus", "detachdot"]:
-            model_output = self.model.model(input_ids=source, decoder_input_ids=target_input_tokens[:, :-1])
+            # model_output = self.model.model(input_ids=source, decoder_input_ids=target_input_tokens[:, :-1])
+            model_output = self.model(input_ids=source, decoder_input_ids=target_input_tokens[:, :-1], go_inside="model")
             hidden_states = model_output[0]
             
             input_embeds = self.model.get_decoder().get_input_embeddings()(target_input_tokens[:, 1:])
@@ -207,7 +209,10 @@ class BARTLoss(BaseLoss):
             else:
                 hidden_states = hidden_states.contiguous()
                 pred_embs = input_embeds.contiguous()
-
+                # print(hidden_states.size())
+                # print(pred_embs.size())
+                # print(final_logits_biases.size())
+                # input()
                 loss = -(hidden_states * pred_embs).sum(dim=-1) - final_logits_biases
                 logits = hidden_states.matmul(self.model.get_decoder().get_input_embeddings().weight.t())
                 # print(logits.size())
@@ -232,6 +237,7 @@ class BARTLoss(BaseLoss):
         return loss, logging_output   
     
     def generate(self, input_ids, **kwargs):
+        print("ok")
         prepared_input = self._prepare_input_for_generation(input_ids, **kwargs)
         output = self.model.generate(**prepared_input)
         # print(self.model.get_input_embeddings().weight)
@@ -245,7 +251,7 @@ class BARTLoss(BaseLoss):
         batch_size = input_ids.size(0)
         #batch size is 1, padding and stuff needs to be modified for this to work for larger batches
 
-        return_object = {'input_ids': input_ids}
+        return_object = {'input_ids': input_ids, 'num_return_sequences': 1}#kwargs.get('num_return_sequences', 1)}
 
         return return_object
     

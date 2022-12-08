@@ -23,6 +23,9 @@ def get_parser():
         "--jsonl-secondary-key", default=None, type=str, help="secondary key to access text in the jsonl file"
     )
     parser.add_argument(
+        "--jsonl-tertiary-key", default=None, type=str, help="tertiary key to access text in the jsonl file"
+    )
+    parser.add_argument(
         "--jsonl-tokenized", default="false", type=str, choices=["true", "false"],  help="the text in jsonl files is already tokenized if true"
     )
     parser.add_argument(
@@ -31,7 +34,7 @@ def get_parser():
     parser.add_argument("--max-length", default=None, type=int, help="L: the sentence length you want to predict at every step. Use this for models which have no padding/trained while also predicting the padding. Not used in experiments reported in the paper")
     parser.add_argument("--max-output-length", default=None, type=int, help="L: the sentence length you want to predict at every step. Use this for models which have no padding/trained while also predicting the padding. Not used in experiments reported in the paper")
     parser.add_argument("--max-prefix-length", default=50, type=int, help="L: the sentence length you want to predict at every step. Use this for models which have no padding/trained while also predicting the padding. Not used in experiments reported in the paper")
-    parser.add_argument("--max-allowed-length", default=200, type=int, help="This is the max length that will fit into the GPU, max_length <= max_allowed_length")
+    parser.add_argument("--max-allowed-length", default=1000, type=int, help="This is the max length that will fit into the GPU, max_length <= max_allowed_length")
     parser.add_argument("--length-diff", default="0", type=str, help="change the length of the target by adding these values")
     parser.add_argument("--restarts", default=0, type=int, help="If the constraints are not satisfied in a run, restart the optimization")
     parser.add_argument("--num_samples", default=1, type=int, help="number of times to run the decoding process for each input")
@@ -68,6 +71,7 @@ def get_parser():
     parser.add_argument("--beam", action="store_true", help="do beam search ")
     parser.add_argument("--st", action="store_true", help="do straight through")
     parser.add_argument("--gold-loss-epsilons", type=str, default="none", help="use gold loss as epsilons")
+    parser.add_argument("--custom-epsilons", type=str, default="none", help="use gold loss as epsilons")
     parser.add_argument("--seed", default=10, type=int, help="random seed")
     parser.add_argument(
         "--log-interval", default=10, type=int, help="interval for logging"
@@ -116,7 +120,7 @@ def get_parser():
         "--topic-target",
         default="none",
         type=str,
-        choices=['computers', 'legal', 'military', 'politics', 'religion', 'science', 'space', 'pizza', 'none'],
+        # choices=['computers', 'legal', 'military', 'politics', 'religion', 'science', 'space', 'pizza', 'none', "extreme", "medium", "mild"],
         help="different LR patterns for different indices, default is constant for all. It gets updated as the training progresses too."
     )
     parser.add_argument(
@@ -130,6 +134,12 @@ def get_parser():
         default=1,
         type=int,
         help="keywords you want appearing in the output text"
+    )
+    parser.add_argument(
+        "--keyword_tau",
+        default=0.01,
+        type=float,
+        help="keywords. Temperature for Gumbel Softmax"
     )
     parser.add_argument(
         "--topic-word-lists",

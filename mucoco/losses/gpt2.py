@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 import numpy as np
 
+torch.set_printoptions(precision=3, sci_mode=False)
+
 @register_loss("gpt2")
 class GPT2Loss(BaseLoss):
 
@@ -22,10 +24,10 @@ class GPT2Loss(BaseLoss):
         self.max_steps = args.coeff_steps
         self.coeff_schedule = args.coeff_pattern
 
-        if args.topic_target != "none":
-            self.extra_prefix = self.tokenizer.encode(args.topic_target+" "+args.topic_target, return_tensors="pt").to(self.device)
-        else:
-            self.extra_prefix = torch.LongTensor([[]]).to(self.device)
+        # if args.topic_target != "none":
+        #     self.extra_prefix = self.tokenizer.encode(" "+args.topic_target+" "+args.topic_target, return_tensors="pt").to(self.device)
+        # else:
+        self.extra_prefix = torch.LongTensor([[]]).to(self.device)
     
     def get_coeff(self, step, seq_len, sched="constant"):
         if step == 0:
@@ -82,26 +84,30 @@ class GPT2Loss(BaseLoss):
         eos = torch.empty((batch_size, 1)).long().to(self.device).fill_(self.eos_token_id) 
 
         embed_lut = self.model.get_input_embeddings()
-        prompt = torch.cat([eos, prompt], dim=1)
+        # prompt = torch.cat([eos, prompt], dim=1)
         # print(self.extra_prefix)
-        input_tokens = torch.cat([self.extra_prefix, prompt, prefix, pred_tokens, context, eos], dim=1)
-        input_embeds = torch.cat([embed_lut(self.extra_prefix), embed_lut(prompt), embed_lut(prefix), pred_embeds, embed_lut(context), embed_lut(eos), embed_lut(eos)], dim=1)
+        input_tokens = torch.cat([self.extra_prefix, prompt, prefix, pred_tokens, context], dim=1)
+        input_embeds = torch.cat([embed_lut(self.extra_prefix), embed_lut(prompt), embed_lut(prefix), pred_embeds, embed_lut(context)], dim=1)
+        # print(input_embeds.dtype)
+        # input()
         preflen = prompt.size(1) + prefix.size(1) 
         predlen = pred_embeds.size(1)
         suflen = context.size(1) + 1
 
+        # print(preflen, prompt.size(1), prompt, predlen)
+
         losstype = getattr(self.args, "loss_type", "xentropy")
         if losstype == "xentropy": #TODO
             model_output = self.model(inputs_embeds=input_embeds)
-            lm_logits = model_output[0][:, preflen-1:-1]
+            lm_logits = model_output[0][:, preflen-1:]
             lm_logprobs = F.log_softmax(lm_logits, dim=-1)
             
             xentropy_pred = (-lm_logprobs[:, :-1] * pred_probs).sum(dim=-1).sum(dim=-1)
 
             #CONTEXT NOT INCORPORATED. IT'S ASSUMED TO BE EMPTY
-            xentropy_pred = xentropy_pred - lm_logprobs[:, -2, self.eos_token_id]
+            # xentropy_pred = xentropy_pred - lm_logprobs[:, -2, self.eos_token_id]
 
-            _, mm = lm_logprobs.max(dim=-1)
+            # _, mm = lm_logprobs.max(dim=-1)
 
             xentropy = xentropy_pred
             if self.args.length_normalize:
@@ -114,13 +120,16 @@ class GPT2Loss(BaseLoss):
                 "max_length": predlen+suflen,
                 "nsentences": batch_size,
                 "lm_logprobs": lm_logprobs.data.cpu(),
-                "mm": mm,
             }
-        elif losstype in ["l2", "cosine", "dot", "dotplusplus", "detachdot", "detachdot2", "typical"]:
-            model_output = self.model(inputs_embeds=input_embeds, step=step, go_inside="transformer")
+        elif losstype in ["l2", "cosine", "dot", "dotplusplus", "detachdot", "detachdot2", "typical", "focal"]:
+            model_output = self.model(inputs_embeds=input_embeds, step=step, go_inside="transformer")#, output_attentions=True)
             
             hidden_states = model_output[0]
             # attentions = model_output['attentions']
+            # print(attentions[-1][0].max(dim=-1)[1])
+            # print(hidden_states.dtype)
+            # print(attentions[-1].size(), hidden_states.size())
+            # input()
             
             entropy = None
             if losstype == "cosine":
@@ -184,6 +193,51 @@ class GPT2Loss(BaseLoss):
                 loss += lognorm
                 loss = loss.sum(dim=-1)
 
+            elif losstype == "focal2": #unlikelihood (focal is the wrong name)
+                k = kwargs.get("kweight")
+                step = kwargs.get("step")
+                
+            
+                hidden_states = hidden_states[:, preflen-1:-1, :].contiguous()#.detach()
+                pred_embs = input_embeds[:, preflen:, :].contiguous()
+                logits = hidden_states.matmul(embed_lut.weight.t())
+                target_logits = (hidden_states * pred_embs).sum(dim=-1,keepdim=True)
+                # print(logits.size())
+                # print(target_logits.size())
+                logits = logits - target_logits
+                # print(logits.size())
+                loss = torch.logsumexp(logits, dim=-1)
+                # input(loss)
+
+                #unlikelihood
+                pairwise = hidden_states.detach().bmm(pred_embs.transpose(1, 2))
+                L = pred_embs.size(1)
+                bandwidth=10
+                C = torch.tril(torch.ones((L, L))).to(self.device)
+                C[bandwidth:, :L-bandwidth] = C[bandwidth:, :L-bandwidth] - torch.tril(torch.ones(L-bandwidth, L-bandwidth)).to(self.device)
+                C = C.detach()
+
+                pairwise = pairwise - target_logits
+                # print(pairwise)
+                # print(pairwise.size())
+                
+                # print((torch.exp(pairwise) * C))
+                unlikelihood = (torch.exp(pairwise) * C).sum(dim=-1).log()                
+                # print(unlikelihood)
+                # input()
+                # print(unlikelihood)
+                # print(unlikelihood.size())
+                # unlikelihood = unlikelihood.sum(dim=-1)
+                # print(unlikelihood)
+                # input()
+                # print(unlikelihood)
+                # unlikelihood = pairwise.sum(dim=-1)
+                loss = 0.4*unlikelihood + loss
+                
+                # coeff = self.get_coeff(step, hidden_states.size(1), sched=self.coeff_schedule)
+                # loss = coeff * loss - (coeff * loss).detach() + loss.detach()
+                # print(coeff)
+                loss = loss.sum(dim=-1)
             
             elif losstype == "dotplusplus":
                 k = kwargs.get("kweight")
@@ -200,11 +254,15 @@ class GPT2Loss(BaseLoss):
                 # loss1 = -(hidden_states1 * pred_embs).sum(dim=-1)
                 # print(loss1.size())
                 hidden_states = hidden_states[:, preflen-1:-1, :].contiguous()
+                # hidden_states = 0.1 * hidden_states + (0.9 * hidden_states).detach()
                 pred_embs = input_embeds[:, preflen:, :].contiguous()
-                
-                loss = -(hidden_states * pred_embs).sum(dim=-1) / temperature
+                logits = hidden_states.matmul(embed_lut.weight.t()) 
 
-                logits = hidden_states.matmul(embed_lut.weight.t()) / temperature
+                # temperature = logits.norm(dim=-1).detach()/1000
+                # print(temperature)
+                loss = -(hidden_states * pred_embs).sum(dim=-1) / temperature
+                # logits = logits / temperature.unsqueeze(2)
+                
                 maxlogit = logits.max(dim=-1, keepdim=True)[0]
                 # print("ok", maxlogit)
                 logits = logits - maxlogit
@@ -266,26 +324,54 @@ class GPT2Loss(BaseLoss):
 
                 # entropy = (-probs * torch.log(probs)).sum(dim=-1)[:, :-suflen].detach()
                 # print(entropy)
+            
+            # elif losstype == "focal":
+            #     k = kwargs.get("kweight")
+            #     step = kwargs.get("step")
+            #     temperature = 1.0
+                
+            #     hidden_states = hidden_states[:, preflen-1:-1, :].contiguous()
+            #     pred_embs = input_embeds[:, preflen:, :].contiguous()
+            #     loss = -(hidden_states * pred_embs).sum(dim=-1) / temperature
+            #     logits = hidden_states.matmul(embed_lut.weight.t()) / temperature
+            #     maxlogit = logits.max(dim=-1, keepdim=True)[0]
+            #     logits = logits - maxlogit
+            #     additive = torch.exp((hidden_states * pred_embs).sum(dim=-1) / temperature - maxlogit.squeeze(-1)) - torch.exp((hidden_states * pred_embs.detach()).sum(dim=-1) / temperature - maxlogit.squeeze(-1))
+                
+            #     lognorm = (logits.exp().sum(dim=-1) + additive).log()
+            #     lognorm = maxlogit.squeeze(-1) + lognorm 
+            #     loss += lognorm ## -log p
+
+            #     # gamma = 1.0
+            #     # loss = (1 - torch.exp(-loss))**gamma * loss 
+
+            #     eps = -1
+            #     oneminusp = (1 - torch.exp(-loss))
+            #     loss = loss + oneminusp*eps
+            #     # loss = loss.sum(dim=-1)
+                
+            #     coeff = self.get_coeff(step, hidden_states.size(1), sched=self.coeff_schedule)
+            #     loss = coeff * loss - (coeff * loss).detach() + loss.detach()
+            #     loss = loss.sum(dim=-1)
 
             elif losstype == "typical":
                 k = kwargs.get("kweight")
                 step = kwargs.get("step")
                 
                 temperature = 1.0
-                hidden_states = hidden_states[:, preflen-1:-1, :].contiguous()
+                hidden_states = hidden_states[:, preflen-1:-1, :].contiguous().detach()
                 pred_embs = input_embeds[:, preflen:, :].contiguous()
-                
-                loss = -(hidden_states.detach() * pred_embs).sum(dim=-1) / temperature
-
+                loss = -(hidden_states * pred_embs).sum(dim=-1) / temperature
                 logits = hidden_states.matmul(embed_lut.weight.t()) / temperature
                 maxlogit = logits.max(dim=-1, keepdim=True)[0]
                 logits = logits - maxlogit
                 additive = torch.exp((hidden_states * pred_embs).sum(dim=-1) / temperature - maxlogit.squeeze(-1)) - torch.exp((hidden_states * pred_embs.detach()).sum(dim=-1) / temperature - maxlogit.squeeze(-1))
+                
                 lognorm = (logits.exp().sum(dim=-1) + additive).log()
                 lognorm = maxlogit.squeeze(-1) + lognorm 
-                loss += lognorm.detach()
+                loss += lognorm ## -log p
                 
-                coeff = self.get_coeff(step, hidden_states.size(1), sched=self.coeff_schedule)
+                # coeff = self.get_coeff(step, hidden_states.size(1), sched=self.coeff_schedule)
                 
                 #entropy
                 logits = hidden_states.matmul(embed_lut.weight.t()) / temperature
@@ -294,11 +380,56 @@ class GPT2Loss(BaseLoss):
                 probs = F.softmax(logits, dim=-1)
 
                 entropy = (-probs * torch.log(probs)).sum(dim=-1)
-
-                loss = (-entropy + loss)
-                loss = coeff * loss - (coeff * loss).detach() + loss.detach()
+                x = torch.abs(entropy - loss)
+                loss = x + loss
+                # loss = coeff * loss - (coeff * loss).detach() + loss.detach()
                 loss = loss.sum(dim=-1)
-                print(entropy)
+                # print(x)
+            elif losstype == "focal": #unlikelihood
+                k = kwargs.get("kweight")
+                step = kwargs.get("step")
+                
+                temperature = 1.0
+                hidden_states = hidden_states[:, preflen-1:-1, :].contiguous()#.detach()
+                pred_embs = input_embeds[:, preflen:, :].contiguous()
+                loss = -(hidden_states * pred_embs).sum(dim=-1) / temperature
+                logits = hidden_states.matmul(embed_lut.weight.t()) / temperature
+                maxlogit = logits.max(dim=-1, keepdim=True)[0]
+                logits = logits - maxlogit
+                additive = torch.exp((hidden_states * pred_embs).sum(dim=-1) / temperature - maxlogit.squeeze(-1)) - torch.exp((hidden_states * pred_embs.detach()).sum(dim=-1) / temperature - maxlogit.squeeze(-1))
+                
+                lognorm = (logits.exp().sum(dim=-1) + additive).log()
+                lognorm = maxlogit.squeeze(-1) + lognorm 
+                loss += lognorm ## -log p
+                
+                # coeff = self.get_coeff(step, hidden_states.size(1), sched=self.coeff_schedule)
+                
+                #unlikelihood
+                #pairwise dotproduct
+                pairwise = -hidden_states.bmm(pred_embs.transpose(1, 2))
+                C = (torch.triu(torch.ones((pred_embs.size(1), pred_embs.size(1)))) - torch.eye(pred_embs.size(1), pred_embs.size(1))).to(self.device).detach()
+                # print(pairwise.size())
+                # print(C)
+                deno = torch.logsumexp(logits, dim=-1, keepdim=True).detach()
+                # print(deno.size())
+                pairwise = (pairwise + deno)* C / (C.sum(dim=-1, keepdim=True) + 1e-8)
+                # print(pairwise)
+                
+                unlikelihood = pairwise.sum(dim=-1)
+                # logits = hidden_states.matmul(embed_lut.weight.t()) / temperature
+                # mask = top_k_top_p_filtering(logits, 0, 0.9)
+                # maxlogit = filtered_logits.max(dim=-1, keepdim=True)[0]
+                # probs = F.softmax(logits, dim=-1)
+
+                # entropy = (-probs * torch.log(probs)).sum(dim=-1)
+                # x = torch.abs(entropy - loss)
+                # print(loss.sum(dim=-1), unlikelihood.sum(dim=-1))
+                loss = -0.2*unlikelihood + loss
+                # print(unlikelihood)
+                # input()
+                # loss = coeff * loss - (coeff * loss).detach() + loss.detach()
+                loss = loss.sum(dim=-1)
+                # print(x)
             else:
                 hidden_states = hidden_states.contiguous()
                 pred_embs = input_embeds[:, source.size(1)+pad_length+1:, :].contiguous()
@@ -347,7 +478,7 @@ class GPT2Loss(BaseLoss):
         if losstype == "xentropy":
             model_output = self.model(input_tokens)
             # target = input_tokens[:, prompt.size(1):,]
-            target = torch.cat([target, context, eos], dim=1)
+            target = torch.cat([target, context], dim=1)
 
             lm_logits = model_output[0][:, prompt.size(1)-1:-1, :]
             lm_logprobs = F.log_softmax(lm_logits, dim=-1)
@@ -365,7 +496,7 @@ class GPT2Loss(BaseLoss):
                 "nsentences": batch_size,
                 "mm": mm,
             }
-        elif losstype in ["l2", "cosine", "dot", "dotplusplus", "detachdot", "detachdot2", "typical"]:
+        elif losstype in ["l2", "cosine", "dot", "dotplusplus", "detachdot", "detachdot2", "typical", "focal"]:
             model_output = self.model.transformer(input_tokens)
             hidden_states = model_output[0][:, prompt.size(1)-1:-1]
             input_embeds = self.model.get_input_embeddings()(input_tokens)
@@ -400,6 +531,29 @@ class GPT2Loss(BaseLoss):
                 # print()
                 # loss += torch.log(torch.exp(hidden_states.matmul(self.model.get_input_embeddings().weight.t()).sum(dim=-1)))
                 loss = loss.sum(dim=-1)
+            
+            elif losstype == "focal":
+                hidden_states = hidden_states.contiguous()
+                pred_embs = input_embeds[:, prompt.size(1):, :].contiguous()
+
+                loss = -(hidden_states * pred_embs).sum(dim=-1)
+                # print(loss)
+                # print(hidden_states.matmul(self.model.get_input_embeddings().weight.t()))
+                # print(torch.logsumexp(hidden_states.matmul(self.model.get_input_embeddings().weight.t()), dim=-1))
+                # print(torch.log(torch.exp(hidden_states.matmul(self.model.get_input_embeddings().weight.t())).sum(dim=-1)))
+                # input("gold")
+                loss += torch.logsumexp(hidden_states.matmul(self.model.get_input_embeddings().weight.t()), dim=-1)
+                # print()
+                # loss += torch.log(torch.exp(hidden_states.matmul(self.model.get_input_embeddings().weight.t()).sum(dim=-1)))
+
+                eps = -1
+
+                loss = loss + (1 - torch.exp(-loss))*eps
+                loss = loss.sum(dim=-1)
+                
+                # coeff = self.get_coeff(step, hidden_states.size(1), sched=self.coeff_schedule)
+                # loss = coeff * loss - (coeff * loss).detach() + loss.detach()
+                # loss = loss.sum(dim=-1)
             
             elif losstype == "typical":
                 hidden_states = hidden_states.contiguous()

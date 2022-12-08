@@ -15,8 +15,10 @@ class MarianMTLoss(BaseLoss):
         self.args = args
         self.device = model.device
 
-        self.pad_token_id = self.tokenizer.pad_token_id
-        self.eos_token_id = self.tokenizer.eos_token_id
+        with tokenizer.as_target_tokenizer():
+            print(self.tokenizer.eos_token)
+            self.pad_token_id = self.tokenizer.pad_token_id
+            self.eos_token_id = self.tokenizer.eos_token_id
     
     def compute_loss(self, batch, preds, **kwargs):
         '''
@@ -28,10 +30,16 @@ class MarianMTLoss(BaseLoss):
 
         pred_tokens, pred_embeds, pred_probs = preds
         pred_probs = pred_probs[0]
+        # print(pred_tokens)
 
         bos = torch.empty((source.size(0), 1)).long().to(self.device).fill_(self.pad_token_id)
         eos = torch.empty((source.size(0), 1)).long().to(self.device).fill_(self.eos_token_id)
+        # print(bos)
+        # print(eos)
+        # input()
+
         target_input_tokens = torch.cat([bos, prefix, pred_tokens, eos], dim=1)
+        # print(target_input_tokens)
 
         embed_lut = self.model.get_decoder().get_input_embeddings()
         target_input_embeds = torch.cat([embed_lut(bos), embed_lut(prefix), pred_embeds, embed_lut(eos)], dim=1)
@@ -96,7 +104,7 @@ class MarianMTLoss(BaseLoss):
             # print("xentropy ends")
 
 
-            model_output = self.model.model(input_ids=source, decoder_inputs_embeds=scaled_target_input_embeds[:, :-1])
+            model_output = self.model(input_ids=source, decoder_inputs_embeds=scaled_target_input_embeds[:, :-1], go_inside="model")
             hidden_states = model_output[0]
             input_embeds = target_input_embeds[:, 1:]
             final_logits_biases = self.model.final_logits_bias[0, target_input_tokens[:, 1:]]
@@ -114,7 +122,7 @@ class MarianMTLoss(BaseLoss):
                 loss = loss.sum(dim=-1)
             
             else:
-                hidden_states = hidden_states.contiguous()
+                hidden_states = hidden_states.contiguous().detach()
                 pred_embs = input_embeds.contiguous()
 
                 # output_embs = (pred_probs.unsqueeze(-1) * self.model.lm_head.weight).sum(dim=-2)
@@ -134,13 +142,16 @@ class MarianMTLoss(BaseLoss):
                 # print(logits)
                 # print(-logits[:, :-1] * pred_probs)
                 # print((-logits[:, :-1] * pred_probs).sum(dim=-1))
-                deno = torch.log(torch.exp(logits).sum(dim=-1))
+                # deno = torch.log(torch.exp(logits).sum(dim=-1))
+                deno = torch.logsumexp(logits, dim=-1)
                 loss += deno
                 # print(loss)
                 loss = loss.sum(dim=-1)
             
-            if self.args.length_normalize:
-                loss = loss/hidden_states.size(1)
+            # if self.args.length_normalize:
+            loss_ = loss/hidden_states.size(1)
+
+            loss = loss - loss.detach() + loss_.detach()
             
             # print(loss)
             # input()
@@ -174,7 +185,7 @@ class MarianMTLoss(BaseLoss):
 
             loss = F.nll_loss(lm_logprobs.squeeze(0), target_input_tokens[:, 1:].squeeze(0), reduction="none")
 
-            print(loss)
+            # print(loss)
             loss = loss.sum(dim=-1)
 
             if self.args.length_normalize:
@@ -190,7 +201,7 @@ class MarianMTLoss(BaseLoss):
             }
             
         elif losstype in ["dot", "dotplusplus"]:
-            model_output = self.model.model(input_ids=source, decoder_input_ids=target_input_tokens[:, :-1])
+            model_output = self.model(input_ids=source, decoder_input_ids=target_input_tokens[:, :-1], go_inside="model")
             hidden_states = model_output[0]
             input_embeds = self.model.get_decoder().get_input_embeddings()(target_input_tokens[:, 1:])
             final_logits_biases = self.model.final_logits_bias[0, target_input_tokens[:, 1:]]
@@ -209,13 +220,13 @@ class MarianMTLoss(BaseLoss):
                 hidden_states = hidden_states.contiguous()
                 pred_embs = input_embeds.contiguous()
 
-                loss = -(hidden_states.detach() * pred_embs).sum(dim=-1) - final_logits_biases
+                loss = -(hidden_states * pred_embs).sum(dim=-1) - final_logits_biases
                 # logits = hidden_states.matmul(self.model.get_decoder().get_input_embeddings().weight.t())
                 # print(logits.size())
                 # logits = logits + self.model.final_logits_bias
                 # loss += torch.log(torch.exp(logits).sum(dim=-1))
 
-                print(loss)
+                # print(loss)
                 loss = loss.sum(dim=-1)
             
             if self.args.length_normalize:
@@ -236,7 +247,7 @@ class MarianMTLoss(BaseLoss):
         prepared_input = self._prepare_input_for_generation(input_ids, **kwargs)
         output = self.model.generate(**prepared_input)
         # print(self.model.get_input_embeddings().weight)
-        # print(str(**prepared_input))
+        # print(str(prepared_input))
         # print("gen", output)
         
         return self._postprocess_output(prepared_input, output)
@@ -266,7 +277,8 @@ class MarianMTLoss(BaseLoss):
         return_object = {'input_ids': source,
                 # 'token_type_ids': segment,
                 'max_length': max_output_length,
-                'num_beams': self.args.beam_size,
+                'num_beams': kwargs.get('num_beams', 1),
+                'num_return_sequences': kwargs.get('num_return_sequences', 1)
                 # 'source_segment_length': source_segment_length}
                 # 'pad_token_id':self.eos_token_id
                 } 
@@ -275,4 +287,4 @@ class MarianMTLoss(BaseLoss):
         return return_object
     
     def _postprocess_output(self, prepared_input, output_ids):
-        return output_ids[:, 1:]
+        return output_ids
