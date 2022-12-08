@@ -35,7 +35,7 @@ The main file to run this decoding algorithm is `decode_new.py`. All models used
 
 ## Keywords
 
-See `examples/MT/constrained_translate.sh`, `examples/summarization/constrained_summarize.sh`
+See `examples/prompt/constrained_sampling_mucola.sh`, `examples/summarization/constrained_summarize_mucola.sh` and `examples/summarization/constrained_summarize_mucola.sh`. More instructions will be added shortly. 
 
 
 
