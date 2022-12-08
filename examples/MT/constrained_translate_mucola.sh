@@ -6,7 +6,7 @@ mkdir -p $OUTDIR
 OUTFILE=$OUTDIR/outputs.txt
 EVALFILE=$OUTDIR/results${15}.txt
 
-DATA=$1 #need to change
+# DATA=$1 # is not used
 
 PRIMARYMODEL=$3
 
@@ -199,7 +199,7 @@ then
     LAMBDALR=1.0
 elif [[ "$option" == "translate-keyword-2" ]]  ## no prompt just generate directly
 then 
-    echo "translate-keyword-1"
+    echo "translate-keyword-2"
     OPTIMSTEPS=250
     DATASTYLE="text"
     DATAFILE=data/MT/terminology_dataset/newstest2017-iate.414.2.terminology.tsv.en
@@ -226,7 +226,7 @@ then
     LAMBDALR=1.0
 elif [[ "$option" == "translate-keyword-3" ]]  ## no prompt just generate directly
 then 
-    echo "translate-keyword-1"
+    echo "translate-keyword-3"
     OPTIMSTEPS=250
     DATASTYLE="text"
     DATAFILE=data/MT/terminology_dataset/newstest2017-iate.414.3.terminology.tsv.en
@@ -266,7 +266,7 @@ then
     tokenizer=$PRIMARYMODEL:$PRIMARYMODEL:$PRIMARYMODEL:$PRIMARYMODEL:$PRIMARYMODEL
     model_types=AutoModelForSeq2SeqLM:AutoModelForSeq2SeqLM:AutoModelForSeq2SeqLM:AutoModelForSeq2SeqLM:AutoModelForSeq2SeqLM
     betas=1.0:0.0:0.0:0.0:0.0
-    loss=marianmt:ngramsl22:ngramsl22:ngramsl22:ngramsl22
+    loss=marianmt:ngramsl22:ngramsl22:ngramsl22:blacklist22
     lossabbr="logpyx:ngramsl22:ngramsl22:ngramsl22:blacklist22"
     epsilons=$CLASSLOGPROB:$CLASSLOGPROB:$CLASSLOGPROB:$CLASSLOGPROB
     label_id=0:0:0:0:0
@@ -556,7 +556,8 @@ then
         --restarts $RESTARTS\
         --outfile $OUTFILE\
         --output-style $OUTPUTSTYLE
-    bash examples/prompt/evaluate.sh $option $OUTFILE $EVALFILE $DATAFILE $TARGETTOPIC
+    python examples/MT/postprocess.py --input-file $OUTFILE --output-file $OUTFILE.postprocess
+    # bash examples/prompt/evaluate.sh $option $OUTFILE $EVALFILE $DATAFILE $TARGETTOPIC
 else
-    bash examples/prompt/evaluate.sh $option $OUTFILE $EVALFILE $DATAFILE $TARGETTOPIC
+    # bash examples/prompt/evaluate.sh $option $OUTFILE $EVALFILE $DATAFILE $TARGETTOPIC
 fi
