@@ -12,18 +12,18 @@ DATA_DIR=data/
 PRIMARYMODEL=$3
 
 #for mucola-disc and mucola-two-disc setups
-SENTIMENTMODELSST2UNCASED=/path/to/sst2-sentimentclassifier-disc
-SENTIMENTMODELYELPUNCASED=/path/to/yelp-sentimentclassifier-disc
+SENTIMENTMODELSST2UNCASED=models/sst2-classifier-disc
+SENTIMENTMODELYELPUNCASED=models/yelp-classifier-disc
 
 #for mucola-gedi setup
-SENTIMENTGENERATIVEMODELSST2=/path/to/sst2-sentimentclassifier-gedi
-SENTIMENTGENERATIVEMODELYELP=/path/to/sst2-sentimentclassifier-gedi
+SENTIMENTGENERATIVEMODELSST2=models/sst2-classifier-gedi
+SENTIMENTGENERATIVEMODELYELP=models/sst2-classifier-gedi
 
 #for mucola-dexperts setup
-SENTIMENTGENERATIVEMODEL2LMSST2=/path/to/finetuned-lm-negative-sst2#/path/to/finetuned-lm-positive-sst2
-SENTIMENTGENERATIVEMODEL2LMYELP=/path/to/finetuned-lm-negative-yelp#/path/to/finetuned-lm-positive-yelp
+SENTIMENTGENERATIVEMODEL2LMSST2=models/finetuned-lm-negative-sst2#models/finetuned-lm-positive-sst2
+SENTIMENTGENERATIVEMODEL2LMYELP=models/finetuned-lm-negative-yelp#models/finetuned-lm-positive-yelp
 
-TOXICITYCLASSIFIER=/path/to/toxicity-classifier
+TOXICITYCLASSIFIER=models/toxicity-classifier ## make sure to train the classifier and place it here
 
 #many of these hyperparams were used while experimentation and debugging and do not need to be changed
 gold_loss_epsilons="none"
@@ -667,61 +667,62 @@ then
     KEYWORDTOPK=${12}
     option="commongen"
     EXTRAS=$ADDITIONALDATAFILE
-elif [[ "$option" == "bart-summarize" ]]  ## no prompt just generate directly
-then 
-    echo "bart-summarize"
-    OPTIMSTEPS=200
-    DATASTYLE="jsonl"
-    JSON_PKEY="article"
-    DATAFILE=$DATA_DIR/../cnn-dailymail/test.jsonl
-    OUTPUTLEN=50
-    MAXLEN=50
-    NUM_SAMPLES=1
-    model=$PRIMARYMODEL
-    tokenizer=$PRIMARYMODEL
-    model_types=AutoModelForSeq2SeqLM
-    betas=1.0
-    loss=bart
-    lossabbr="logpyx"
-    epsilons=none
-    label_id=none
-    min_epsilons=none
-    epsilon_warmup_steps=none
-    epsilon_cooldown_steps=none
-    epsilon_decay_functions=none
-    noise_variance=1.0
-    embedgd_do_sample="false"
-    LAMBDALR=1.0
-elif [[ "$option" == "bart-summarize-keyword" ]]  ## no prompt just generate directly
-then 
-    echo "bart-summarize-keyword"
-    OPTIMSTEPS=200
-    DATASTYLE="jsonl"
-    JSON_PKEY="article"
-    KEYWORDS="none:${10}"
-    DATAFILE=$DATA_DIR/../cnn-dailymail/test.jsonl
-    OUTPUTLEN=50
-    MAXLEN=50
-    NUM_SAMPLES=1
-    model=$PRIMARYMODEL:$PRIMARYMODEL
-    tokenizer=$PRIMARYMODEL:$PRIMARYMODEL
-    model_types=AutoModelForSeq2SeqLM:AutoModelForSeq2SeqLM
-    betas=1.0:0.0
-    loss=bart:ngrams
-    lossabbr="logpyx:ngrams"
-    epsilons=$CLASSLOGPROB
-    label_id=0:0
-    min_epsilons=$CLASSLOGPROB
-    epsilon_warmup_steps=0
-    epsilon_cooldown_steps=1
-    epsilon_decay_functions=step
-    noise_variance=1.0
-    embedgd_do_sample="false"
-    LAMBDALR=1.0
 else
     echo "wrong task"
     exit 1
 fi
+# elif [[ "$option" == "bart-summarize" ]]  ## no prompt just generate directly
+# then 
+#     echo "bart-summarize"
+#     OPTIMSTEPS=200
+#     DATASTYLE="jsonl"
+#     JSON_PKEY="article"
+#     DATAFILE=$DATA_DIR/../cnn-dailymail/test.jsonl
+#     OUTPUTLEN=50
+#     MAXLEN=50
+#     NUM_SAMPLES=1
+#     model=$PRIMARYMODEL
+#     tokenizer=$PRIMARYMODEL
+#     model_types=AutoModelForSeq2SeqLM
+#     betas=1.0
+#     loss=bart
+#     lossabbr="logpyx"
+#     epsilons=none
+#     label_id=none
+#     min_epsilons=none
+#     epsilon_warmup_steps=none
+#     epsilon_cooldown_steps=none
+#     epsilon_decay_functions=none
+#     noise_variance=1.0
+#     embedgd_do_sample="false"
+#     LAMBDALR=1.0
+# elif [[ "$option" == "bart-summarize-keyword" ]]  ## no prompt just generate directly
+# then 
+#     echo "bart-summarize-keyword"
+#     OPTIMSTEPS=200
+#     DATASTYLE="jsonl"
+#     JSON_PKEY="article"
+#     KEYWORDS="none:${10}"
+#     DATAFILE=$DATA_DIR/../cnn-dailymail/test.jsonl
+#     OUTPUTLEN=50
+#     MAXLEN=50
+#     NUM_SAMPLES=1
+#     model=$PRIMARYMODEL:$PRIMARYMODEL
+#     tokenizer=$PRIMARYMODEL:$PRIMARYMODEL
+#     model_types=AutoModelForSeq2SeqLM:AutoModelForSeq2SeqLM
+#     betas=1.0:0.0
+#     loss=bart:ngrams
+#     lossabbr="logpyx:ngrams"
+#     epsilons=$CLASSLOGPROB
+#     label_id=0:0
+#     min_epsilons=$CLASSLOGPROB
+#     epsilon_warmup_steps=0
+#     epsilon_cooldown_steps=1
+#     epsilon_decay_functions=step
+#     noise_variance=1.0
+#     embedgd_do_sample="false"
+#     LAMBDALR=1.0
+x
 
 
 debug=$4
